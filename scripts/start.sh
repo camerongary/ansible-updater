@@ -18,6 +18,11 @@ echo "[$(date)] Slack webhook configured: $([ -n "$SLACK_WEBHOOK_URL" ] && echo 
 mkdir -p "$REPORTS_DIR"
 mkdir -p "$(dirname "$LOG_FILE")"
 
+# Start web dashboard in the background
+python3 /scripts/web_server.py &
+WEB_PID=$!
+echo "[$(date)] Web dashboard started on port 8080 (pid $WEB_PID)" | tee -a "$LOG_FILE"
+
 # Function to log messages (stderr only so stdout can carry data)
 log() {
     echo "[$(date)] $1" | tee -a "$LOG_FILE" >&2
