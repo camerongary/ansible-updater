@@ -1,0 +1,106 @@
+version: '3.8'
+
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+# This adds development-specific services and configurations
+
+services:
+  ansible-updater:
+    # Override production settings for development
+    environment:
+      - ANSIBLE_VERBOSITY=1
+      - DEBUG=true
+    ports:
+      - "8080:8080"  # Expose Flask directly for debugging
+    volumes:
+      - ./ansible:/ansible
+      - ./reports:/reports
+      - ./scripts:/scripts
+      - ~/.ssh:/root/.ssh:ro
+    command: >
+      bash -c "
+        echo 'Development mode - waiting for services...'
+        sleep 2
+        /scripts/start.sh
+      "
+
+  # Test Debian container
+  test-debian:
+    image: ubuntu:22.04
+    container_name: test-debian-host
+    hostname: test-debian
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    volumes:
+      - /var/lib/apt:/var/lib/apt
+    command: >
+      bash -c "
+        apt-get update > /dev/null 2>&1
+        apt-get install -y openssh-server > /dev/null 2>&1
+        mkdir -p /root/.ssh
+        sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+        sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+        service ssh start
+        tail -f /dev/null
+      "
+    networks:
+      - ansible-net
+
+  # Test RedHat container
+  test-redhat:
+    image: redhat/ubi9:latest
+    container_name: test-redhat-host
+    hostname: test-redhat
+    command: >
+      bash -c "
+        dnf install -y openssh-server openssh-clients > /dev/null 2>&1
+        mkdir -p /root/.ssh
+        sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+        sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+        /usr/sbin/sshd -D &
+        tail -f /dev/null
+      "
+    networks:
+      - ansible-net
+
+  # Additional test Debian
+  test-debian-2:
+    image: debian:bookworm
+    container_name: test-debian-2-host
+    hostname: test-debian-2
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    command: >
+      bash -c "
+        apt-get update > /dev/null 2>&1
+        apt-get install -y openssh-server > /dev/null 2>&1
+        mkdir -p /root/.ssh
+        sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+        service ssh start
+        tail -f /dev/null
+      "
+    networks:
+      - ansible-net
+
+  # Monitoring/Debug container
+  monitor:
+    image: ubuntu:22.04
+    container_name: ansible-monitor
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    command: >
+      bash -c "
+        apt-get update > /dev/null 2>&1
+        apt-get install -y nmap curl jq procps > /dev/null 2>&1
+        tail -f /dev/null
+      "
+    networks:
+      - ansible-net
+    volumes:
+      - ./reports:/reports:ro
+
+networks:
+  ansible-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  ansible-updater:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ansible-updater
+    environment:
+      - ANSIBLE_HOST_KEY_CHECKING=False
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/YOUR/WEBHOOK/URL}
+      - NETWORK_RANGE=${NETWORK_RANGE:-192.168.12.0/24}
+      - UPDATE_INTERVAL=${UPDATE_INTERVAL:-3600}
+    volumes:
+      - ./ansible:/ansible
+      - ./reports:/reports
+      - ~/.ssh:/root/.ssh:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - ansible-net
+    restart: unless-stopped
+
+networks:
+  ansible-net:
+    driver: bridge
+

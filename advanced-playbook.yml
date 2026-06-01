@@ -1,0 +1,372 @@
+---
+- name: Advanced Linux Update Management with Reboot Handling
+  hosts: all
+  gather_facts: yes
+  serial: 1  # Process one host at a time for safety
+  
+  vars:
+    # Reboot configuration
+    auto_reboot: false  # Set to true to automatically reboot if needed
+    reboot_timeout: 300
+    pre_reboot_delay: 0
+    post_reboot_delay: 30
+    
+    # Maintenance windows (optional)
+    allowed_reboot_hours: "2-4"  # UTC hours when reboots allowed
+    
+    # Backup settings
+    create_snapshot: false  # For VMs, create snapshot before updates
+    backup_dir: "/var/backups/pre-update"
+
+  pre_tasks:
+    - name: Initialize facts
+      set_fact:
+        update_start_time: "{{ ansible_date_time.iso8601 }}"
+        updates_available: 0
+        updates_installed: 0
+        security_updates: 0
+        system_reboot_required: false
+        kernel_update_applied: false
+        services_restarted: []
+
+    - name: Pre-update health check
+      block:
+        - name: Check disk space
+          stat:
+            path: /
+          register: root_disk
+        
+        - name: Fail if low disk space
+          fail:
+            msg: "Insufficient disk space: {{ (root_disk.stat.size / 1024 / 1024 / 1024) | int }}GB available"
+          when: (root_disk.stat.size / 1024 / 1024 / 1024) | int < 1
+
+        - name: Check system load
+          shell: cat /proc/loadavg | awk '{print $1}'
+          register: system_load
+          changed_when: false
+
+        - name: Warn if high load
+          debug:
+            msg: "WARNING: High system load - {{ system_load.stdout }}"
+          when: (system_load.stdout | float) > 4.0
+
+    - name: Create backup directory
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0755'
+      when: create_snapshot
+
+    - name: Backup package list
+      shell: "dpkg -l > {{ backup_dir }}/packages.list 2>/dev/null || rpm -qa > {{ backup_dir }}/packages.list"
+      when: create_snapshot
+      changed_when: false
+
+  tasks:
+    # DEBIAN/UBUNTU TASKS
+    - name: "Debian Block"
+      block:
+        - name: Update package manager cache
+          apt:
+            update_cache: yes
+            cache_valid_time: 3600
+          register: apt_cache_update
+
+        - name: Get list of upgradable packages
+          shell: apt list --upgradable 2>/dev/null | tail -n +2
+          register: upgradable_packages
+          changed_when: false
+
+        - name: Parse upgradable count
+          set_fact:
+            updates_available: "{{ upgradable_packages.stdout_lines | length }}"
+
+        - name: Get security-only upgradable packages
+          shell: |
+            apt-get -s upgrade 2>/dev/null | grep -i security | wc -l
+          register: debian_security
+          changed_when: false
+
+        - name: Set security updates count
+          set_fact:
+            security_updates: "{{ debian_security.stdout | int }}"
+
+        - name: Check for held packages
+          shell: apt-mark showhold 2>/dev/null || echo ""
+          register: held_packages
+          changed_when: false
+
+        - name: Display held packages
+          debug:
+            msg: "Held packages (will not update): {{ held_packages.stdout_lines | default([]) }}"
+          when: held_packages.stdout | length > 0
+
+        - name: Upgrade all packages (Debian)
+          apt:
+            upgrade: dist
+            autoclean: yes
+            autoremove: yes
+          register: apt_upgrade_result
+          retries: 3
+          delay: 10
+
+        - name: Count installed updates
+          set_fact:
+            updates_installed: "{{ upgradable_packages.stdout_lines | length }}"
+
+        - name: Check if kernel was updated
+          shell: |
+            if grep -q "linux-image\|linux-headers" {{ backup_dir }}/packages.list 2>/dev/null; then
+              echo "yes"
+            else
+              echo "no"
+            fi
+          register: kernel_check
+          changed_when: false
+          when: create_snapshot
+
+        - name: Set kernel update flag
+          set_fact:
+            kernel_update_applied: "{{ kernel_check.stdout == 'yes' }}"
+          when: create_snapshot
+
+        - name: Check if reboot needed (Debian)
+          stat:
+            path: /var/run/reboot-required
+          register: debian_reboot_required
+
+        - name: Get reboot reason if available
+          command: cat /var/run/reboot-required.pkgs
+          register: reboot_reason
+          changed_when: false
+          when: debian_reboot_required.stat.exists
+          ignore_errors: true
+
+        - name: Set reboot required flag (Debian)
+          set_fact:
+            system_reboot_required: "{{ debian_reboot_required.stat.exists }}"
+
+        - name: Display reboot reason
+          debug:
+            msg: "Reboot required for: {{ reboot_reason.stdout_lines | default([]) }}"
+          when: debian_reboot_required.stat.exists
+
+      when: ansible_os_family == "Debian"
+
+    # REDHAT/CENTOS/FEDORA TASKS
+    - name: "RedHat Block"
+      block:
+        - name: Update package manager cache
+          dnf:
+            update_cache: yes
+          register: dnf_cache_update
+          when: ansible_os_family == "RedHat"
+
+        - name: Check for available updates
+          shell: dnf check-update 2>/dev/null | tail -1 | awk '{print $1}'
+          register: redhat_check_update
+          changed_when: false
+          failed_when: false
+
+        - name: Set updates available count
+          set_fact:
+            updates_available: "{{ redhat_check_update.stdout | int(default=0) }}"
+
+        - name: List available updates
+          shell: dnf check-update 2>/dev/null | head -20
+          register: dnf_list
+          changed_when: false
+
+        - name: Display available updates
+          debug:
+            msg: "{{ dnf_list.stdout_lines }}"
+
+        - name: Check for security updates
+          shell: |
+            dnf updateinfo list security 2>/dev/null | grep -c "Security" || echo "0"
+          register: redhat_security
+          changed_when: false
+          failed_when: false
+
+        - name: Set security updates count
+          set_fact:
+            security_updates: "{{ redhat_security.stdout | int(default=0) }}"
+
+        - name: Perform system update (RedHat)
+          dnf:
+            name: "*"
+            state: latest
+          register: dnf_upgrade_result
+          retries: 3
+          delay: 10
+
+        - name: Count installed updates
+          set_fact:
+            updates_installed: "{{ dnf_upgrade_result.results | length if dnf_upgrade_result.results is defined else 0 }}"
+
+        - name: Check for kernel updates
+          shell: |
+            if dnf check-update 2>/dev/null | grep -q "kernel"; then
+              echo "yes"
+            else
+              echo "no"
+            fi
+          register: kernel_check_redhat
+          changed_when: false
+
+        - name: Set kernel update flag (RedHat)
+          set_fact:
+            kernel_update_applied: "{{ kernel_check_redhat.stdout == 'yes' }}"
+
+        - name: Check for reboot requirement
+          shell: |
+            if [ -f /var/run/yum.pid ] || [ -f /var/run/dnf.pid ]; then
+              echo "yes"
+            elif rpm -qa kernel\* 2>/dev/null | wc -l | grep -q "^[2-9]$"; then
+              echo "yes"
+            else
+              echo "no"
+            fi
+          register: reboot_check
+          changed_when: false
+
+        - name: Set reboot required flag (RedHat)
+          set_fact:
+            system_reboot_required: "{{ reboot_check.stdout == 'yes' }}"
+
+      when: ansible_os_family == "RedHat"
+
+    # CONDITIONAL REBOOT HANDLING
+    - name: "Reboot Handling"
+      block:
+        - name: Check if in maintenance window
+          set_fact:
+            in_maintenance_window: "{{ ansible_date_time.hour | int in range(allowed_reboot_hours.split('-') | map('int') | list) }}"
+
+        - name: Display reboot status
+          debug:
+            msg: |
+              Reboot Status:
+              - Required: {{ system_reboot_required }}
+              - Auto-reboot enabled: {{ auto_reboot }}
+              - In maintenance window: {{ in_maintenance_window }}
+              - Kernel updated: {{ kernel_update_applied }}
+
+        - name: Reboot system if required
+          reboot:
+            msg: "Rebooting due to system updates"
+            connect_timeout: 5
+            reboot_timeout: "{{ reboot_timeout }}"
+            pre_reboot_delay: "{{ pre_reboot_delay }}"
+            post_reboot_delay: "{{ post_reboot_delay }}"
+            test_command: whoami
+          when:
+            - system_reboot_required
+            - auto_reboot or kernel_update_applied
+            - in_maintenance_window or not auto_reboot
+
+        - name: Schedule reboot if not in maintenance window
+          shell: |
+            shutdown -r +60 "System reboot scheduled by Ansible for security updates"
+          when:
+            - system_reboot_required
+            - auto_reboot
+            - not in_maintenance_window
+            - ansible_os_family == "Debian"
+
+      when: system_reboot_required
+
+    # POST-UPDATE SERVICES RESTART
+    - name: "Service Management"
+      block:
+        - name: Identify services that need restart
+          shell: |
+            if command -v needrestart &> /dev/null; then
+              needrestart -nr 2>/dev/null | grep "NEEDRESTART" || echo ""
+            else
+              echo ""
+            fi
+          register: services_need_restart
+          changed_when: false
+
+        - name: Restart critical services
+          systemd:
+            name: "{{ item }}"
+            state: restarted
+            daemon_reload: yes
+          loop:
+            - ssh
+            - rsyslog
+          when:
+            - not system_reboot_required
+            - updates_installed | int > 0
+          ignore_errors: true
+          register: services_restart_result
+
+        - name: Record restarted services
+          set_fact:
+            services_restarted: "{{ services_restart_result.results | map(attribute='item') | list if services_restart_result.results is defined else [] }}"
+
+      when: not system_reboot_required and updates_installed | int > 0
+
+  post_tasks:
+    - name: System information after updates
+      gather_facts:
+        gather_subset:
+          - hardware
+          - network
+          - os
+
+    - name: Create comprehensive result JSON
+      copy:
+        content: |
+          {
+            "hostname": "{{ inventory_hostname }}",
+            "timestamp": "{{ ansible_date_time.iso8601 }}",
+            "update_start_time": "{{ update_start_time }}",
+            "update_duration_seconds": "{{ ((ansible_date_time.epoch | int) - (update_start_time | to_datetime | epoch)) }}",
+            "os_family": "{{ ansible_os_family }}",
+            "os_name": "{{ ansible_distribution }} {{ ansible_distribution_version }}",
+            "kernel_version": "{{ ansible_kernel }}",
+            "ip_address": "{{ ansible_default_ipv4.address | default('N/A') }}",
+            "updates": {
+              "available": {{ updates_available }},
+              "installed": {{ updates_installed }},
+              "security_updates": {{ security_updates }},
+              "kernel_updated": {{ kernel_update_applied | lower }}
+            },
+            "system_status": {
+              "reboot_required": {{ system_reboot_required | lower }},
+              "services_restarted": {{ services_restarted | to_json }},
+              "disk_usage_percent": {{ (ansible_mounts[0].size_total - ansible_mounts[0].size_available) / ansible_mounts[0].size_total * 100 | round(2) }},
+              "load_average": {
+                "1min": {{ ansible_uptime_seconds | default(0) }},
+                "5min": {{ ansible_uptime_seconds | default(0) }},
+                "15min": {{ ansible_uptime_seconds | default(0) }}
+              }
+            },
+            "status": "{% if updates_installed | int > 0 %}updates_applied{% elif system_reboot_required %}reboot_needed{% else %}up_to_date{% endif %}"
+          }
+        dest: "/reports/{{ inventory_hostname }}_detailed_result.json"
+      delegate_to: localhost
+
+    - name: Display final summary
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════╗
+          ║         UPDATE CYCLE SUMMARY - {{ inventory_hostname }}  ║
+          ╠════════════════════════════════════════════════════════╣
+          ║ Distribution: {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_os_family }})
+          ║ Kernel: {{ ansible_kernel }}
+          ║ IP Address: {{ ansible_default_ipv4.address | default('N/A') }}
+          ║────────────────────────────────────────────────────────║
+          ║ Available Updates: {{ updates_available }}
+          ║ Installed Updates: {{ updates_installed }}
+          ║ Security Updates: {{ security_updates }}
+          ║ Kernel Updated: {{ kernel_update_applied }}
+          ║────────────────────────────────────────────────────────║
+          ║ Reboot Required: {{ system_reboot_required }}
+          ║ Services Restarted: {{ services_restarted | length }}
+          ║ Status: {% if updates_installed | int > 0 %}✓ Updates Applied{% elif system_reboot_required %}⚠ Reboot Needed{% else %}✓ Up to Date{% endif %}
+          ║╚════════════════════════════════════════════════════════╝

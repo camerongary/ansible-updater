@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 60s
+  scrape_timeout: 10s
+  evaluation_interval: 60s
+
+scrape_configs:
+  # Ansible Update Manager metrics
+  - job_name: 'ansible-updater'
+    static_configs:
+      - targets: ['localhost:8081']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'ansible-updater'
+
+  # Docker container metrics (optional)
+  - job_name: 'docker'
+    static_configs:
+      - targets: ['localhost:9323']
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'container_(network|fs|memory|cpu).*'
+        action: keep
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files: []
+
+# Optional: Add alert rules
+#rule_files:
+#  - '/etc/prometheus/ansible-updater-alerts.yml'

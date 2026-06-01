@@ -1,0 +1,46 @@
+[Unit]
+Description=Ansible Update Manager
+Documentation=https://github.com/yourusername/ansible-update-manager
+Requires=docker.service
+After=docker.service
+Wants=docker.socket
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+
+# Working directory
+WorkingDirectory=/opt/ansible-update-manager
+
+# Load environment variables
+EnvironmentFile=/opt/ansible-update-manager/.env
+EnvironmentFile=-/etc/ansible-updater/config
+
+# Pre-start checks
+ExecStartPre=/usr/bin/docker compose version
+ExecStartPre=/bin/sh -c 'mkdir -p /var/log/ansible-updater'
+
+# Start service
+ExecStart=/usr/bin/docker compose up
+
+# Stop service
+ExecStop=/usr/bin/docker compose down
+
+# Security options
+PrivateTmp=true
+NoNewPrivileges=true
+
+# Resource limits
+# Limit memory usage
+MemoryLimit=2G
+# Limit CPU (0.5 cores)
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ansible-updater
+
+[Install]
+WantedBy=multi-user.target

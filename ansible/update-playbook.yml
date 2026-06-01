@@ -1,0 +1,154 @@
+---
+- name: Update Linux Systems (Debian and RedHat based)
+  hosts: all
+  gather_facts: yes
+  vars:
+    result_file: "/reports/updates_default.json"
+  
+  handlers:
+    - name: restart system
+      reboot:
+        msg: "Reboot initiated by Ansible for updates"
+        connect_timeout: 5
+        reboot_timeout: 300
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+      listen: reboot required
+
+  pre_tasks:
+    - name: Initialize update statistics
+      set_fact:
+        updates_available: 0
+        updates_installed: 0
+        security_updates: 0
+        system_reboot_required: false
+
+  tasks:
+    # DEBIAN/UBUNTU TASKS
+    - name: Debian - Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+      register: apt_cache_update
+
+    - name: Debian - Check for available updates
+      shell: apt list --upgradable 2>/dev/null | wc -l
+      when: ansible_os_family == "Debian"
+      register: debian_upgradable
+      changed_when: false
+
+    - name: Debian - Get security updates
+      shell: |
+        apt list --upgradable 2>/dev/null | grep -c "Security" || true
+      when: ansible_os_family == "Debian"
+      register: debian_security
+      changed_when: false
+
+    - name: Debian - Perform system upgrades
+      apt:
+        upgrade: dist
+        autoclean: yes
+        autoremove: yes
+      when: ansible_os_family == "Debian"
+      register: debian_update_result
+
+    - name: Debian - Set update statistics
+      set_fact:
+        updates_available: "{{ debian_upgradable.stdout | int }}"
+        security_updates: "{{ debian_security.stdout | int }}"
+        updates_installed: "{{ debian_update_result.stdout_lines | length | default(0) }}"
+      when: ansible_os_family == "Debian"
+
+    - name: Debian - Check if reboot required
+      stat:
+        path: /var/run/reboot-required
+      when: ansible_os_family == "Debian"
+      register: debian_reboot_required
+
+    - name: Debian - Set reboot flag
+      set_fact:
+        system_reboot_required: true
+      when: 
+        - ansible_os_family == "Debian"
+        - debian_reboot_required.stat.exists
+
+    # REDHAT/CENTOS/FEDORA TASKS
+    - name: RedHat - Update package cache
+      dnf:
+        name: "*"
+        state: latest
+        update_cache: yes
+      when: ansible_os_family == "RedHat"
+      register: redhat_update_result
+
+    - name: RedHat - Check for available updates
+      shell: dnf check-update 2>/dev/null | tail -1 | awk '{print $1}' || echo "0"
+      when: ansible_os_family == "RedHat"
+      register: redhat_upgradable
+      changed_when: false
+      ignore_errors: yes
+
+    - name: RedHat - Get security updates info
+      shell: |
+        dnf updateinfo list security 2>/dev/null | grep -c "Security" || true
+      when: ansible_os_family == "RedHat"
+      register: redhat_security
+      changed_when: false
+      ignore_errors: yes
+
+    - name: RedHat - Set update statistics
+      set_fact:
+        updates_available: "{{ redhat_upgradable.stdout | int }}"
+        security_updates: "{{ redhat_security.stdout | int }}"
+        updates_installed: "{{ redhat_update_result.changed | ternary(redhat_update_result.results | length, 0) }}"
+      when: ansible_os_family == "RedHat"
+
+    - name: RedHat - Check if reboot required
+      command: "[ -f /boot/initramfs-$(uname -r).img ] && echo 'reboot_required' || echo 'no_reboot'"
+      when: ansible_os_family == "RedHat"
+      register: redhat_reboot_check
+      changed_when: false
+      ignore_errors: yes
+
+    - name: RedHat - Set reboot flag
+      set_fact:
+        system_reboot_required: "{{ 'reboot_required' in redhat_reboot_check.stdout }}"
+      when: ansible_os_family == "RedHat"
+
+  post_tasks:
+    - name: Collect final system info
+      setup:
+        gather_subset: 
+          - hardware
+          - network
+
+    - name: Save results to JSON file
+      copy:
+        content: |
+          {
+            "hostname": "{{ inventory_hostname }}",
+            "timestamp": "{{ ansible_date_time.iso8601 }}",
+            "os_family": "{{ ansible_os_family }}",
+            "os_name": "{{ ansible_distribution }} {{ ansible_distribution_version }}",
+            "updates_available": {{ updates_available }},
+            "security_updates": {{ security_updates }},
+            "updates_installed": {{ updates_installed }},
+            "reboot_required": {{ system_reboot_required | lower }},
+            "kernel": "{{ ansible_kernel }}",
+            "ip_address": "{{ ansible_default_ipv4.address | default('N/A') }}"
+          }
+        dest: "/reports/{{ inventory_hostname }}_update_result.json"
+      delegate_to: localhost
+
+    - name: Display update summary
+      debug:
+        msg: |
+          ========== UPDATE SUMMARY ==========
+          Host: {{ inventory_hostname }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Updates Available: {{ updates_available }}
+          Security Updates: {{ security_updates }}
+          Updates Installed: {{ updates_installed }}
+          Reboot Required: {{ system_reboot_required }}
+          ===================================
