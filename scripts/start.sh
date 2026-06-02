@@ -153,23 +153,39 @@ run_updates() {
     fi
 }
 
-# Main loop
-while true; do
+TRIGGER_FILE="/tmp/trigger_scan"
+LOCK_FILE="/tmp/scan_running"
+
+run_cycle() {
+    touch "$LOCK_FILE"
     log "================================"
     log "Starting update cycle"
     log "================================"
-    
-    # Discover systems
+
     if HOSTS=$(discover_systems); then
-        # Generate inventory
         generate_inventory "$HOSTS"
-        
-        # Run updates
         run_updates
     else
         log "Skipping updates - no hosts discovered"
     fi
-    
+
+    rm -f "$LOCK_FILE"
     log "Update cycle completed. Next cycle in $UPDATE_INTERVAL seconds"
-    sleep "$UPDATE_INTERVAL"
+}
+
+# Main loop
+while true; do
+    rm -f "$TRIGGER_FILE"
+    run_cycle
+
+    # Sleep, but wake early if the web UI drops a trigger file
+    elapsed=0
+    while [ "$elapsed" -lt "$UPDATE_INTERVAL" ]; do
+        sleep 10
+        elapsed=$((elapsed + 10))
+        if [ -f "$TRIGGER_FILE" ]; then
+            log "Manual scan triggered via web UI"
+            break
+        fi
+    done
 done

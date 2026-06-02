@@ -4,8 +4,11 @@ import json
 import os
 import glob
 from datetime import datetime
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, request
 from pathlib import Path
+
+TRIGGER_FILE = "/tmp/trigger_scan"
+LOCK_FILE = "/tmp/scan_running"
 
 app = Flask(__name__)
 REPORTS_DIR = "/reports"
@@ -233,7 +236,30 @@ def index():
             color: white;
             font-size: 13px;
         }}
-        
+
+        .scan-btn {{
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 22px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s, opacity 0.2s;
+            margin-top: 12px;
+        }}
+        .scan-btn:hover:not(:disabled) {{
+            background: #5a6fd6;
+        }}
+        .scan-btn:disabled {{
+            opacity: 0.6;
+            cursor: not-allowed;
+        }}
+        .scan-btn.running {{
+            background: #f39c12;
+        }}
+
         .refresh-info {{
             background: rgba(255, 255, 255, 0.1);
             color: white;
@@ -260,9 +286,60 @@ def index():
     </style>
     <script>
         // Auto-refresh page every 30 seconds
-        setTimeout(function() {{
-            location.reload();
-        }}, 30000);
+        setTimeout(function() {{ location.reload(); }}, 30000);
+
+        const btn = document.getElementById('scanBtn');
+        let pollInterval = null;
+
+        function setScanState(state) {{
+            if (state === 'idle') {{
+                btn.textContent = 'Scan Now';
+                btn.disabled = false;
+                btn.classList.remove('running');
+            }} else if (state === 'queued') {{
+                btn.textContent = 'Queued...';
+                btn.disabled = true;
+                btn.classList.add('running');
+            }} else if (state === 'running') {{
+                btn.textContent = 'Scanning...';
+                btn.disabled = true;
+                btn.classList.add('running');
+            }}
+        }}
+
+        function pollStatus() {{
+            fetch('/api/scan/status')
+                .then(r => r.json())
+                .then(data => {{
+                    if (data.running) {{
+                        setScanState('running');
+                    }} else if (data.queued) {{
+                        setScanState('queued');
+                    }} else {{
+                        setScanState('idle');
+                        clearInterval(pollInterval);
+                        pollInterval = null;
+                        location.reload();
+                    }}
+                }});
+        }}
+
+        function triggerScan() {{
+            setScanState('queued');
+            fetch('/api/scan', {{ method: 'POST' }})
+                .then(r => {{
+                    if (r.status === 409) {{
+                        setScanState('running');
+                    }}
+                    if (!pollInterval) {{
+                        pollInterval = setInterval(pollStatus, 3000);
+                    }}
+                }})
+                .catch(() => setScanState('idle'));
+        }}
+
+        // Pick up state on page load (e.g. if scan is already running)
+        pollStatus();
     </script>
 </head>
 <body>
@@ -274,6 +351,7 @@ def index():
         <header>
             <h1>🔄 System Update Report</h1>
             <p>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <button id="scanBtn" class="scan-btn" onclick="triggerScan()">Scan Now</button>
         </header>
         
         <div class="stats-grid">
@@ -347,6 +425,22 @@ def api_stats():
     }
     
     return jsonify(stats)
+
+@app.route('/api/scan', methods=['POST'])
+def trigger_scan():
+    """Trigger a manual scan cycle"""
+    if os.path.exists(LOCK_FILE):
+        return jsonify({"status": "already_running"}), 409
+    Path(TRIGGER_FILE).touch()
+    return jsonify({"status": "triggered"}), 202
+
+@app.route('/api/scan/status')
+def scan_status():
+    """Return whether a scan is currently running"""
+    return jsonify({
+        "running": os.path.exists(LOCK_FILE),
+        "queued": os.path.exists(TRIGGER_FILE),
+    })
 
 @app.route('/health')
 def health():
