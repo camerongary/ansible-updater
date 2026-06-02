@@ -1,0 +1,23 @@
+---
+- name: Bootstrap new host — install SSH key and passwordless sudo
+  hosts: all
+  gather_facts: no
+  become: yes
+
+  tasks:
+    - name: Ensure .ssh directory exists for cameron
+      file:
+        path: /home/cameron/.ssh
+        state: directory
+        owner: cameron
+        group: cameron
+        mode: '0700'
+
+    - name: Install sudoers entry for cameron
+      copy:
+        dest: /etc/sudoers.d/ansible-cameron
+        content: "cameron ALL=(ALL) NOPASSWD: ALL\n"
+        owner: root
+        group: root
+        mode: '0440'
+        validate: visudo -cf %s

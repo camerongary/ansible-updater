@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     nmap \
     python3-pip \
     openssh-client \
+    sshpass \
     curl \
     jq \
     git \
