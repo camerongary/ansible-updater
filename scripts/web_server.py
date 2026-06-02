@@ -290,6 +290,7 @@ def index():
 
         const btn = document.getElementById('scanBtn');
         let pollInterval = null;
+        let wasActive = false;
 
         function setScanState(state) {{
             if (state === 'idle') {{
@@ -312,19 +313,25 @@ def index():
                 .then(r => r.json())
                 .then(data => {{
                     if (data.running) {{
+                        wasActive = true;
                         setScanState('running');
                     }} else if (data.queued) {{
+                        wasActive = true;
                         setScanState('queued');
                     }} else {{
                         setScanState('idle');
                         clearInterval(pollInterval);
                         pollInterval = null;
-                        location.reload();
+                        if (wasActive) {{
+                            wasActive = false;
+                            location.reload();
+                        }}
                     }}
                 }});
         }}
 
         function triggerScan() {{
+            wasActive = true;
             setScanState('queued');
             fetch('/api/scan', {{ method: 'POST' }})
                 .then(r => {{
@@ -335,10 +342,10 @@ def index():
                         pollInterval = setInterval(pollStatus, 3000);
                     }}
                 }})
-                .catch(() => setScanState('idle'));
+                .catch(() => {{ wasActive = false; setScanState('idle'); }});
         }}
 
-        // Pick up state on page load (e.g. if scan is already running)
+        // Pick up in-progress state on page load without triggering a reload
         pollStatus();
     </script>
 </head>
