@@ -284,74 +284,6 @@ def index():
             }}
         }}
     </style>
-    <script>
-        // Auto-refresh page every 30 seconds
-        setTimeout(function() {{ location.reload(); }}, 30000);
-
-        document.addEventListener('DOMContentLoaded', function() {{
-
-        const btn = document.getElementById('scanBtn');
-        let pollInterval = null;
-        let wasActive = false;
-
-        function setScanState(state) {{
-            if (state === 'idle') {{
-                btn.textContent = 'Scan Now';
-                btn.disabled = false;
-                btn.classList.remove('running');
-            }} else if (state === 'queued') {{
-                btn.textContent = 'Queued...';
-                btn.disabled = true;
-                btn.classList.add('running');
-            }} else if (state === 'running') {{
-                btn.textContent = 'Scanning...';
-                btn.disabled = true;
-                btn.classList.add('running');
-            }}
-        }}
-
-        function pollStatus() {{
-            fetch('/api/scan/status')
-                .then(r => r.json())
-                .then(data => {{
-                    if (data.running) {{
-                        wasActive = true;
-                        setScanState('running');
-                    }} else if (data.queued) {{
-                        wasActive = true;
-                        setScanState('queued');
-                    }} else {{
-                        setScanState('idle');
-                        clearInterval(pollInterval);
-                        pollInterval = null;
-                        if (wasActive) {{
-                            wasActive = false;
-                            location.reload();
-                        }}
-                    }}
-                }});
-        }}
-
-        function triggerScan() {{
-            wasActive = true;
-            setScanState('queued');
-            fetch('/api/scan', {{ method: 'POST' }})
-                .then(r => {{
-                    if (r.status === 409) {{
-                        setScanState('running');
-                    }}
-                    if (!pollInterval) {{
-                        pollInterval = setInterval(pollStatus, 3000);
-                    }}
-                }})
-                .catch(() => {{ wasActive = false; setScanState('idle'); }});
-        }}
-
-        // Pick up in-progress state on page load without triggering a reload
-        pollStatus();
-
-        }}); // end DOMContentLoaded
-    </script>
 </head>
 <body>
     <div class="container">
@@ -362,7 +294,7 @@ def index():
         <header>
             <h1>🔄 System Update Report</h1>
             <p>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-            <button id="scanBtn" class="scan-btn" onclick="triggerScan()">Scan Now</button>
+            <button id="scanBtn" class="scan-btn">Scan Now</button>
         </header>
         
         <div class="stats-grid">
@@ -411,6 +343,69 @@ def index():
             <p>Automated System Update Monitor</p>
         </div>
     </div>
+
+    <script>
+        // Auto-refresh page every 30 seconds
+        setTimeout(function() {{ location.reload(); }}, 30000);
+
+        const btn = document.getElementById('scanBtn');
+        let pollInterval = null;
+        let wasActive = false;
+
+        function setScanState(state) {{
+            if (state === 'idle') {{
+                btn.textContent = 'Scan Now';
+                btn.disabled = false;
+                btn.classList.remove('running');
+            }} else if (state === 'queued') {{
+                btn.textContent = 'Queued...';
+                btn.disabled = true;
+                btn.classList.add('running');
+            }} else if (state === 'running') {{
+                btn.textContent = 'Scanning...';
+                btn.disabled = true;
+                btn.classList.add('running');
+            }}
+        }}
+
+        function pollStatus() {{
+            fetch('/api/scan/status')
+                .then(r => r.json())
+                .then(data => {{
+                    if (data.running) {{
+                        wasActive = true;
+                        setScanState('running');
+                    }} else if (data.queued) {{
+                        wasActive = true;
+                        setScanState('queued');
+                    }} else {{
+                        setScanState('idle');
+                        clearInterval(pollInterval);
+                        pollInterval = null;
+                        if (wasActive) {{
+                            wasActive = false;
+                            location.reload();
+                        }}
+                    }}
+                }});
+        }}
+
+        btn.addEventListener('click', function() {{
+            wasActive = true;
+            setScanState('queued');
+            fetch('/api/scan', {{ method: 'POST' }})
+                .then(r => {{
+                    if (r.status === 409) {{ setScanState('running'); }}
+                    if (!pollInterval) {{
+                        pollInterval = setInterval(pollStatus, 3000);
+                    }}
+                }})
+                .catch(() => {{ wasActive = false; setScanState('idle'); }});
+        }});
+
+        // Pick up in-progress state on page load without triggering a reload
+        pollStatus();
+    </script>
 </body>
 </html>"""
     
