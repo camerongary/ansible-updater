@@ -61,7 +61,46 @@ check_ssh() {
         -i /root/.ssh/id_ed25519 "${user}@${host}" true 2>/dev/null
 }
 
-# Bootstrap a new host: copy SSH key then install passwordless sudo
+# Check whether passwordless sudo works (not needed for root-access hosts)
+check_sudo() {
+    local host=$1
+    ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -i /root/.ssh/id_ed25519 "cameron@${host}" "sudo -n true" 2>/dev/null
+}
+
+# Connect as root via password and install sudo + sudoers entry for cameron,
+# and also copy the SSH key to root's authorized_keys (for XCP-ng style hosts)
+setup_sudo() {
+    local host=$1
+    local pub_key
+    pub_key=$(cat /root/.ssh/id_ed25519.pub)
+
+    if ! sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
+            -o StrictHostKeyChecking=no \
+            -o PreferredAuthentications=password \
+            "root@${host}" \
+            "which sudo || apt-get install -y sudo 2>/dev/null || yum install -y sudo 2>/dev/null" 2>/dev/null; then
+        log "Bootstrap warning: could not connect as root to $host — sudo setup skipped"
+        return 1
+    fi
+
+    sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
+        -o StrictHostKeyChecking=no \
+        -o PreferredAuthentications=password \
+        "root@${host}" \
+        "echo 'cameron ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ansible-cameron && chmod 440 /etc/sudoers.d/ansible-cameron" 2>/dev/null \
+        && log "Passwordless sudo configured on $host" \
+        || log "Bootstrap warning: could not write sudoers on $host"
+
+    # Also copy key to root's authorized_keys (for XCP-ng / root-only hosts)
+    sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
+        -o StrictHostKeyChecking=no \
+        -o PreferredAuthentications=password \
+        "root@${host}" \
+        "mkdir -p /root/.ssh && chmod 700 /root/.ssh && grep -qxF '$pub_key' /root/.ssh/authorized_keys 2>/dev/null || echo '$pub_key' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys" 2>/dev/null
+}
+
+# Bootstrap a new host: copy SSH key then set up sudo
 bootstrap_host() {
     local host=$1
     if [ -z "$BOOTSTRAP_PASSWORD" ]; then
@@ -70,31 +109,24 @@ bootstrap_host() {
 
     log "Bootstrapping new host $host..."
 
-    # Copy SSH key using password auth
-    if ! sshpass -p "$BOOTSTRAP_PASSWORD" ssh-copy-id \
-            -i /root/.ssh/id_ed25519.pub \
+    # Copy SSH key to cameron's authorized_keys using password auth
+    local pub_key
+    pub_key=$(cat /root/.ssh/id_ed25519.pub)
+    if ! sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
             -o StrictHostKeyChecking=no \
             -o PreferredAuthentications=password \
-            "cameron@${host}" 2>/dev/null; then
+            "cameron@${host}" \
+            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -qxF '$pub_key' ~/.ssh/authorized_keys 2>/dev/null || echo '$pub_key' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" 2>/dev/null; then
         log "Bootstrap failed for $host — could not copy SSH key"
         return 1
     fi
 
-    # Install passwordless sudo via Ansible (use password for become)
-    if ! ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook \
-            "$ANSIBLE_DIR/bootstrap.yml" \
-            -i "${host}," \
-            -e "ansible_user=cameron" \
-            -e "ansible_ssh_pass=$BOOTSTRAP_PASSWORD" \
-            -e "ansible_become_pass=$BOOTSTRAP_PASSWORD" 2>/dev/null; then
-        log "Bootstrap warning: sudo setup failed for $host — key copied but sudo may require password"
-    fi
-
+    setup_sudo "$host"
     log "Bootstrap complete for $host"
     return 0
 }
 
-# Function to generate Ansible inventory (only includes reachable hosts)
+# Function to generate Ansible inventory (only includes hosts that are fully ready)
 generate_inventory() {
     local hosts=$1
     local inventory_file="$ANSIBLE_DIR/hosts.yml"
@@ -103,7 +135,7 @@ generate_inventory() {
     printf 'all:\n  hosts:\n' > "$inventory_file"
 
     for host in $(echo "$hosts" | tr ',' '\n'); do
-        # Determine the expected user for this host (honour host_vars override)
+        # Determine the expected user (honour host_vars override for root-access hosts)
         local user=cameron
         local host_vars_file="$ANSIBLE_DIR/host_vars/${host}.yml"
         if [ -f "$host_vars_file" ] && grep -q 'ansible_user: root' "$host_vars_file"; then
@@ -111,6 +143,16 @@ generate_inventory() {
         fi
 
         if check_ssh "$host" "$user"; then
+            # SSH key works — for cameron hosts also verify sudo is ready
+            if [ "$user" = "cameron" ] && ! check_sudo "$host"; then
+                log "$host: SSH key works but sudo not ready — running sudo setup"
+                setup_sudo "$host"
+                # If sudo still not working after setup, skip
+                if ! check_sudo "$host"; then
+                    log "Skipping $host — sudo setup failed"
+                    continue
+                fi
+            fi
             printf '    %s:\n      ansible_user: %s\n' "$host" "$user" >> "$inventory_file"
             reachable=$((reachable + 1))
         elif bootstrap_host "$host"; then
