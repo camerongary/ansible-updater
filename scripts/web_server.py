@@ -288,6 +288,8 @@ def index():
         // Auto-refresh page every 30 seconds
         setTimeout(function() {{ location.reload(); }}, 30000);
 
+        document.addEventListener('DOMContentLoaded', function() {{
+
         const btn = document.getElementById('scanBtn');
         let pollInterval = null;
         let wasActive = false;
@@ -347,6 +349,8 @@ def index():
 
         // Pick up in-progress state on page load without triggering a reload
         pollStatus();
+
+        }}); // end DOMContentLoaded
     </script>
 </head>
 <body>
