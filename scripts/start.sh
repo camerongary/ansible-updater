@@ -68,36 +68,47 @@ check_sudo() {
         -i /root/.ssh/id_ed25519 "cameron@${host}" "sudo -n true" 2>/dev/null
 }
 
-# Connect as root via password and install sudo + sudoers entry for cameron,
-# and also copy the SSH key to root's authorized_keys (for XCP-ng style hosts)
+# Install sudo and configure passwordless sudoers for cameron.
+# Tries root login first; falls back to 'sudo -S' via cameron if root is blocked.
 setup_sudo() {
     local host=$1
     local pub_key
     pub_key=$(cat /root/.ssh/id_ed25519.pub)
+    local sudoers_cmd="apt-get install -y sudo 2>/dev/null || yum install -y sudo 2>/dev/null; echo 'cameron ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ansible-cameron && chmod 440 /etc/sudoers.d/ansible-cameron"
+    local root_key_cmd="mkdir -p /root/.ssh && chmod 700 /root/.ssh && grep -qxF '$pub_key' /root/.ssh/authorized_keys 2>/dev/null || echo '$pub_key' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys"
 
-    if ! sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
+    if sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
             -o StrictHostKeyChecking=no \
             -o PreferredAuthentications=password \
-            "root@${host}" \
-            "which sudo || apt-get install -y sudo 2>/dev/null || yum install -y sudo 2>/dev/null" 2>/dev/null; then
-        log "Bootstrap warning: could not connect as root to $host — sudo setup skipped"
-        return 1
+            "root@${host}" "true" 2>/dev/null; then
+        # Root password login works — use it directly
+        sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
+            -o StrictHostKeyChecking=no \
+            -o PreferredAuthentications=password \
+            "root@${host}" "$sudoers_cmd && $root_key_cmd" 2>/dev/null \
+            && log "Passwordless sudo configured on $host (via root)" \
+            || log "Bootstrap warning: root sudoers write failed on $host"
+    else
+        # Root blocked — use cameron's password with sudo -S
+        # Check if sudo is even installed before trying sudo -S
+        if ! sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
+                -o StrictHostKeyChecking=no \
+                -o PreferredAuthentications=password \
+                "cameron@${host}" "which sudo" 2>/dev/null; then
+            log "ACTION REQUIRED — $host: sudo not installed and root SSH is disabled."
+            log "  SSH in and run: su -c 'apt-get install -y sudo && echo cameron ALL=\(ALL\) NOPASSWD: ALL > /etc/sudoers.d/ansible-cameron && chmod 440 /etc/sudoers.d/ansible-cameron'"
+            return 1
+        fi
+
+        log "$host: root login unavailable, trying sudo -S via cameron"
+        sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
+            -o StrictHostKeyChecking=no \
+            -o PreferredAuthentications=password \
+            "cameron@${host}" \
+            "echo '$BOOTSTRAP_PASSWORD' | sudo -S bash -c '$sudoers_cmd'" 2>/dev/null \
+            && log "Passwordless sudo configured on $host (via sudo -S)" \
+            || log "Bootstrap warning: sudo -S setup failed on $host — password may differ from SSH password"
     fi
-
-    sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
-        -o StrictHostKeyChecking=no \
-        -o PreferredAuthentications=password \
-        "root@${host}" \
-        "echo 'cameron ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ansible-cameron && chmod 440 /etc/sudoers.d/ansible-cameron" 2>/dev/null \
-        && log "Passwordless sudo configured on $host" \
-        || log "Bootstrap warning: could not write sudoers on $host"
-
-    # Also copy key to root's authorized_keys (for XCP-ng / root-only hosts)
-    sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
-        -o StrictHostKeyChecking=no \
-        -o PreferredAuthentications=password \
-        "root@${host}" \
-        "mkdir -p /root/.ssh && chmod 700 /root/.ssh && grep -qxF '$pub_key' /root/.ssh/authorized_keys 2>/dev/null || echo '$pub_key' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys" 2>/dev/null
 }
 
 # Bootstrap a new host: copy SSH key then set up sudo
