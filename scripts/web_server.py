@@ -293,7 +293,7 @@ def index():
         
         <header>
             <h1>🔄 System Update Report</h1>
-            <p>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p>Last updated: <span id="lastUpdated" data-utc="{datetime.now().isoformat()}"></span></p>
             <button id="scanBtn" class="scan-btn">Scan Now</button>
         </header>
         
@@ -347,6 +347,12 @@ def index():
     <script>
         // Auto-refresh page every 30 seconds
         setTimeout(function() {{ location.reload(); }}, 30000);
+
+        const el = document.getElementById('lastUpdated');
+        if (el) {{
+            const d = new Date(el.dataset.utc + 'Z');
+            el.textContent = d.toLocaleString();
+        }}
 
         const btn = document.getElementById('scanBtn');
         let pollInterval = null;
