@@ -1,17 +1,16 @@
 # Deploying / updating on the Docker host
 
 The app runs on the Docker host (**192.168.12.30**) at
-`/home/cameron/homelab-compose/ansible-updater`, as part of the
-`camerongary/homelab-compose` repo. The live `.env` and the `reports/` data are
+`/home/cameron/homelab-compose/ansible-updater` (a clone of the
+`camerongary/ansible-updater` repo). The live `.env` and the `reports/` data are
 git-ignored, so they survive updates.
 
 ## Update workflow (git pull on host)
 
 ```bash
-ssh cameron@192.168.12.30
-cd /home/cameron/homelab-compose
+ssh cameron@192.168.12.30   # or docker.camerongary.com when away
+cd /home/cameron/homelab-compose/ansible-updater
 git pull
-cd ansible-updater
 docker compose build
 docker compose up -d
 docker compose logs -f          # watch it start the dashboard, poller, check cycle
