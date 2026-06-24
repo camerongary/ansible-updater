@@ -5,7 +5,7 @@
 Your Slack webhook has been **fully integrated** into the entire system!
 
 ### Webhook Details
-- **Workspace**: T0ALY7FCQ6P
+- **Workspace**: YOUR_WORKSPACE_ID
 - **Channel**: Will post to the channel you configured the webhook for
 - **Status**: ✅ Active and Ready
 

@@ -1,9 +1,19 @@
+# Secrets / live config — never commit
 .env
-.DS_Store
-__pycache__/
-*.pyc
-.pytest_cache/
+
+# Runtime data (results, work orders, audit log)
 reports/
+
+# Generated inventory
 ansible/hosts.yml
-ansible/host_vars/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Backups / archives
 *.tar.gz
+*.zip
+
+# macOS
+.DS_Store

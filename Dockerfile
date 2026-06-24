@@ -1,9 +1,10 @@
 FROM ubuntu:22.04
 
-ENV DEBIAN_FRONTEND=noninteractive TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive TZ=America/Los_Angeles
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
+    tzdata \
     nmap \
     python3-pip \
     openssh-client \

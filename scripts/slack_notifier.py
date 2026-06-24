@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import json
 import sys
 import os
@@ -9,6 +10,7 @@ import requests
 
 REPORTS_DIR = "/reports"
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://192.168.12.30:8080")
 
 def load_latest_results():
     """Load the most recent update results"""
@@ -45,7 +47,7 @@ def build_slack_message(results):
         }
     
     # Calculate stats
-    total_updates = sum(r.get("updates_installed", 0) for r in results)
+    total_updates = sum(r.get("updates_available", 0) for r in results)
     total_security = sum(r.get("security_updates", 0) for r in results)
     reboot_needed = sum(1 for r in results if r.get("reboot_required", False))
     
@@ -59,9 +61,9 @@ def build_slack_message(results):
     
     # Build host fields
     host_fields = []
-    for host in sorted(results, key=lambda x: x.get("updates_installed", 0), reverse=True):
-        hostname = host.get("hostname", "Unknown")
-        updates = host.get("updates_installed", 0)
+    for host in sorted(results, key=lambda x: x.get("updates_available", 0), reverse=True):
+        hostname = host.get("display_name") or host.get("hostname", "Unknown")
+        updates = host.get("updates_available", 0)
         security = host.get("security_updates", 0)
         reboot = ":warning:" if host.get("reboot_required") else ":white_check_mark:"
         
@@ -135,7 +137,7 @@ def build_slack_message(results):
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"<http://localhost|View Full Report> • Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            "text": f"<{DASHBOARD_URL}|View Full Report> • Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         }
     })
     
@@ -166,13 +168,39 @@ def send_to_slack(message):
         print(f"Error sending Slack notification: {e}", file=sys.stderr)
         return False
 
+def build_action_message(action, host, packages, result):
+    """Build a Slack message for an apply/reboot action taken via the dashboard."""
+    emoji = ":white_check_mark:" if result == "success" else ":x:"
+    verb = {"apply": "Updates applied to", "reboot": "Reboot of"}.get(action, action)
+    pkg_line = f"\n*Packages:* {', '.join(packages)}" if packages else ""
+    return {
+        "text": f"{verb} {host}",
+        "blocks": [{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{emoji} *{verb} {host}* — {result}{pkg_line}",
+            },
+        }],
+    }
+
+
 def main():
-    # Load results
-    results = load_latest_results()
-    
-    # Build and send message
-    message = build_slack_message(results)
+    parser = argparse.ArgumentParser(description="Send Slack notifications")
+    parser.add_argument("--action", choices=["apply", "reboot"],
+                        help="send a per-host action notification instead of the cycle summary")
+    parser.add_argument("--host", default="")
+    parser.add_argument("--packages", default="", help="comma-separated package names")
+    parser.add_argument("--result", default="success")
+    args, _ = parser.parse_known_args()
+
+    if args.action:
+        packages = [p for p in args.packages.split(",") if p]
+        message = build_action_message(args.action, args.host, packages, args.result)
+    else:
+        message = build_slack_message(load_latest_results())
     send_to_slack(message)
+
 
 if __name__ == "__main__":
     main()

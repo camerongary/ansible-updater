@@ -35,7 +35,7 @@ def calculate_stats(results):
     
     return {
         "total_hosts": len(results),
-        "total_updates": sum(r.get("updates_installed", 0) for r in results),
+        "total_updates": sum(r.get("updates_available", 0) for r in results),
         "total_security": sum(r.get("security_updates", 0) for r in results),
         "hosts_needing_reboot": sum(1 for r in results if r.get("reboot_required", False))
     }
@@ -44,7 +44,7 @@ def get_status_color(host_data):
     """Determine color based on host status"""
     if host_data.get("reboot_required"):
         return "#ff6b6b"  # Red
-    elif host_data.get("updates_installed", 0) > 0:
+    elif host_data.get("updates_available", 0) > 0:
         return "#ffd93d"  # Yellow
     else:
         return "#6bcf7f"  # Green
@@ -301,11 +301,11 @@ def generate_html(results, stats):
         reboot_badge_class = "status-danger" if host.get("reboot_required") else "status-success"
         
         status_color = get_status_color(host)
-        updates = host.get("updates_installed", 0)
-        
+        updates = host.get("updates_available", 0)
+
         if updates > 0:
             status_class = "status-warning"
-            status_text = "Updates Applied"
+            status_text = "Updates Available"
         elif host.get("reboot_required"):
             status_class = "status-danger"
             status_text = "Reboot Needed"
@@ -315,7 +315,7 @@ def generate_html(results, stats):
         
         table_rows += f"""
                     <tr>
-                        <td><strong>{host.get('hostname', 'Unknown')}</strong></td>
+                        <td><strong>{host.get('display_name') or host.get('hostname', 'Unknown')}</strong></td>
                         <td>{host.get('os_name', 'Unknown')}</td>
                         <td>{host.get('ip_address', 'N/A')}</td>
                         <td><span class="number-badge">{updates}</span></td>

@@ -1,38 +1,72 @@
 #!/bin/bash
+#
+# Orchestrator for the Ansible Update Manager (approval workflow).
+#
+#   * launches the Flask approval dashboard
+#   * main loop: discover hosts -> bootstrap/inventory -> CHECK for updates (no
+#     changes) -> report.  Wakes early when the dashboard requests a scan.
+#   * poller:    apply / reboot work orders approved via the dashboard
+#
+# REQUIRE_APPROVAL=true  (default): each cycle only CHECKS; nothing is installed
+#                                   until approved in the dashboard.
+# REQUIRE_APPROVAL=false          : legacy behaviour — auto-apply everything each
+#                                   cycle.  (Reboots always require approval.)
 
 set -e
 
 # Configuration
 NETWORK_RANGE="${NETWORK_RANGE:-192.168.1.0/24}"
 UPDATE_INTERVAL="${UPDATE_INTERVAL:-3600}"
-SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/YOUR/WEBHOOK/URL}"
+REQUIRE_APPROVAL="${REQUIRE_APPROVAL:-true}"
+SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
 BOOTSTRAP_PASSWORD="${BOOTSTRAP_PASSWORD:-}"
 REPORTS_DIR="/reports"
 ANSIBLE_DIR="/ansible"
 LOG_FILE="/var/log/ansible/updater.log"
+POLL_INTERVAL=15
+
+TRIGGER_FILE="/tmp/trigger_scan"   # dashboard "Scan Now" drops this
+LOCK_FILE="/tmp/scan_running"       # UI busy flag (dashboard reads it)
+ANSIBLE_LOCK="/tmp/ansible.lock"    # mutex dir: only one playbook at a time
+
+mkdir -p "$REPORTS_DIR" "$(dirname "$LOG_FILE")"
 
 echo "[$(date)] Starting Ansible Update Manager" | tee -a "$LOG_FILE"
-echo "[$(date)] Configuration: NETWORK_RANGE=$NETWORK_RANGE, UPDATE_INTERVAL=${UPDATE_INTERVAL}s" | tee -a "$LOG_FILE"
+echo "[$(date)] NETWORK_RANGE=$NETWORK_RANGE UPDATE_INTERVAL=${UPDATE_INTERVAL}s REQUIRE_APPROVAL=$REQUIRE_APPROVAL" | tee -a "$LOG_FILE"
 echo "[$(date)] Slack webhook configured: $([ -n "$SLACK_WEBHOOK_URL" ] && echo 'YES' || echo 'NO')" | tee -a "$LOG_FILE"
-
-# Create necessary directories
-mkdir -p "$REPORTS_DIR"
-mkdir -p "$(dirname "$LOG_FILE")"
 
 # Start web dashboard in the background
 python3 /scripts/web_server.py &
 WEB_PID=$!
 echo "[$(date)] Web dashboard started on port 8080 (pid $WEB_PID)" | tee -a "$LOG_FILE"
 
-# Function to log messages (stderr only so stdout can carry data)
+# Log to stderr so stdout can carry data returned by functions
 log() {
     echo "[$(date)] $1" | tee -a "$LOG_FILE" >&2
 }
 
-# Function to run nmap discovery
+# --------------------------------------------------------------------------- #
+# Mutex so the check cycle and the apply poller never run a playbook at once.
+# --------------------------------------------------------------------------- #
+acquire_lock() {
+    local waited=0
+    while ! mkdir "$ANSIBLE_LOCK" 2>/dev/null; do
+        sleep 1
+        waited=$((waited + 1))
+        if [ "$waited" -ge 1800 ]; then
+            log "WARN: stale ansible lock, reclaiming"
+            rmdir "$ANSIBLE_LOCK" 2>/dev/null || true
+        fi
+    done
+}
+release_lock() { rmdir "$ANSIBLE_LOCK" 2>/dev/null || true; }
+
+# --------------------------------------------------------------------------- #
+# Discovery + inventory (unchanged from the host's bootstrap-aware version)
+# --------------------------------------------------------------------------- #
 discover_systems() {
     log "Starting network discovery on $NETWORK_RANGE..."
-    
+
     nmap -sn "$NETWORK_RANGE" -oG - | grep "Up" | awk '{print $2}' > /tmp/live_hosts.txt
 
     # Filter out excluded hosts if exclude list exists
@@ -43,12 +77,12 @@ discover_systems() {
     fi
 
     HOSTS=$(cat /tmp/live_hosts.txt | tr '\n' ',' | sed 's/,$//')
-    
+
     if [ -z "$HOSTS" ]; then
         log "No hosts discovered"
         return 1
     fi
-    
+
     log "Discovered hosts: $HOSTS"
     echo "$HOSTS"
 }
@@ -69,7 +103,6 @@ check_sudo() {
 }
 
 # Install sudo and configure passwordless sudoers for cameron.
-# Tries root login first; falls back to 'sudo -S' via cameron if root is blocked.
 setup_sudo() {
     local host=$1
     local pub_key
@@ -81,7 +114,6 @@ setup_sudo() {
             -o StrictHostKeyChecking=no \
             -o PreferredAuthentications=password \
             "root@${host}" "true" 2>/dev/null; then
-        # Root password login works — use it directly
         sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
             -o StrictHostKeyChecking=no \
             -o PreferredAuthentications=password \
@@ -89,8 +121,6 @@ setup_sudo() {
             && log "Passwordless sudo configured on $host (via root)" \
             || log "Bootstrap warning: root sudoers write failed on $host"
     else
-        # Root blocked — use cameron's password with sudo -S
-        # Check if sudo is even installed before trying sudo -S
         if ! sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
                 -o StrictHostKeyChecking=no \
                 -o PreferredAuthentications=password \
@@ -120,7 +150,6 @@ bootstrap_host() {
 
     log "Bootstrapping new host $host..."
 
-    # Copy SSH key to cameron's authorized_keys using password auth
     local pub_key
     pub_key=$(cat /root/.ssh/id_ed25519.pub)
     if ! sshpass -p "$BOOTSTRAP_PASSWORD" ssh \
@@ -137,7 +166,62 @@ bootstrap_host() {
     return 0
 }
 
-# Function to generate Ansible inventory (only includes hosts that are fully ready)
+# Write a "needs setup" result so a reachable-but-unprivileged host still shows
+# on the dashboard (with its hostname) instead of being silently skipped.
+write_needs_setup() {
+    local host=$1 name
+    local reason="${2:-passwordless sudo is not configured (sudo missing and root SSH disabled)}"
+    name=$(ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -i /root/.ssh/id_ed25519 "cameron@${host}" hostname 2>/dev/null)
+    [ -z "$name" ] && name="$host"
+    jq -n --arg h "$host" --arg n "$name" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg r "$reason" \
+        '{hostname:$h, display_name:$n, ip_address:$h, os_name:"—", kernel:"",
+          timestamp:$ts, updates_available:0, security_updates:0,
+          reboot_required:false, status:"needs_setup", last_applied:null,
+          applied_packages:[], available_packages:[], setup_reason:$r}' \
+        > "$REPORTS_DIR/${host}_update_result.json"
+    log "$host ($name): flagged as needs_setup on dashboard"
+}
+
+# Re-evaluate and check a single host (dashboard "Rescan"). Works even if the
+# host isn't currently in the inventory (e.g. it was needs_setup until fixed):
+# re-runs the SSH/sudo decision, then checks it via a one-host inventory.
+recheck_host() {
+    local host=$1 user=cameron
+    local hv="$ANSIBLE_DIR/host_vars/${host}.yml"
+    [ -f "$hv" ] && grep -q 'ansible_user: root' "$hv" && user=root
+
+    if check_ssh "$host" "$user"; then
+        if [ "$user" = "cameron" ] && ! check_sudo "$host"; then
+            setup_sudo "$host"
+            if ! check_sudo "$host"; then
+                write_needs_setup "$host"
+                return 1
+            fi
+        fi
+    elif bootstrap_host "$host"; then
+        user=cameron
+        if ! check_sudo "$host"; then
+            write_needs_setup "$host" "SSH key is set up but passwordless sudo is not configured for cameron"
+            return 1
+        fi
+    else
+        write_needs_setup "$host" "host is not reachable over SSH"
+        return 1
+    fi
+
+    local inv="/tmp/recheck_${host}.yml"
+    printf 'all:\n  hosts:\n    %s:\n      ansible_user: %s\n' "$host" "$user" > "$inv"
+    acquire_lock
+    ansible-playbook "$ANSIBLE_DIR/check-updates-playbook.yml" -i "$inv" -l "$host" \
+        2>&1 | tee -a "$LOG_FILE"
+    local rc=${PIPESTATUS[0]}
+    release_lock
+    rm -f "$inv"
+    return "$rc"
+}
+
+# Generate Ansible inventory (only hosts that are fully reachable/ready)
 generate_inventory() {
     local hosts=$1
     local inventory_file="$ANSIBLE_DIR/hosts.yml"
@@ -146,7 +230,6 @@ generate_inventory() {
     printf 'all:\n  hosts:\n' > "$inventory_file"
 
     for host in $(echo "$hosts" | tr ',' '\n'); do
-        # Determine the expected user (honour host_vars override for root-access hosts)
         local user=cameron
         local host_vars_file="$ANSIBLE_DIR/host_vars/${host}.yml"
         if [ -f "$host_vars_file" ] && grep -q 'ansible_user: root' "$host_vars_file"; then
@@ -154,21 +237,27 @@ generate_inventory() {
         fi
 
         if check_ssh "$host" "$user"; then
-            # SSH key works — for cameron hosts also verify sudo is ready
             if [ "$user" = "cameron" ] && ! check_sudo "$host"; then
                 log "$host: SSH key works but sudo not ready — running sudo setup"
                 setup_sudo "$host"
-                # If sudo still not working after setup, skip
                 if ! check_sudo "$host"; then
                     log "Skipping $host — sudo setup failed"
+                    write_needs_setup "$host"
                     continue
                 fi
             fi
+            # Host is fully ready; the check playbook will (over)write its result.
             printf '    %s:\n      ansible_user: %s\n' "$host" "$user" >> "$inventory_file"
             reachable=$((reachable + 1))
         elif bootstrap_host "$host"; then
-            printf '    %s:\n      ansible_user: cameron\n' "$host" >> "$inventory_file"
-            reachable=$((reachable + 1))
+            # Key copied — but only add it if passwordless sudo actually works,
+            # otherwise the check would fail with "Missing sudo password".
+            if check_sudo "$host"; then
+                printf '    %s:\n      ansible_user: cameron\n' "$host" >> "$inventory_file"
+                reachable=$((reachable + 1))
+            else
+                write_needs_setup "$host" "SSH key is set up but passwordless sudo is not configured for cameron"
+            fi
         else
             log "Skipping $host — not reachable via SSH"
         fi
@@ -182,56 +271,219 @@ generate_inventory() {
     log "Generated inventory at $inventory_file ($reachable hosts)"
 }
 
-# Function to run updates and capture results
-run_updates() {
-    log "Running system updates..."
-    
-    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    RESULT_FILE="$REPORTS_DIR/updates_${TIMESTAMP}.json"
-    
-    # Run the Ansible playbook and capture output
-    ansible-playbook \
-        "$ANSIBLE_DIR/update-playbook.yml" \
-        -i "$ANSIBLE_DIR/hosts.yml" \
-        -e "result_file=$RESULT_FILE" \
-        --extra-vars="timestamp=$TIMESTAMP" \
+# --------------------------------------------------------------------------- #
+# CHECK phase: gather available updates (no changes). Optional host limit.
+# --------------------------------------------------------------------------- #
+run_check() {
+    local host=$1 inv="$ANSIBLE_DIR/hosts.yml" limit_arg="" tmp=""
+    if [ -n "$host" ]; then
+        # Single-host check (e.g. post-apply refresh): use a one-host inventory so
+        # it works even if the host isn't in the main hosts.yml yet.
+        tmp="/tmp/check_${host}.yml"
+        write_host_inventory "$host" "$tmp"
+        inv="$tmp"; limit_arg="-l $host"
+    fi
+    log "Checking for available updates ${host:+on $host}..."
+    acquire_lock
+    ansible-playbook "$ANSIBLE_DIR/check-updates-playbook.yml" -i "$inv" $limit_arg \
         2>&1 | tee -a "$LOG_FILE"
-    
-    log "Update completed. Results saved to $RESULT_FILE"
-    
-    # If result file exists, generate reports
-    if [ -f "$RESULT_FILE" ]; then
-        python3 /scripts/generate_reports.py "$RESULT_FILE"
-        python3 /scripts/slack_notifier.py "$RESULT_FILE"
+    local rc=${PIPESTATUS[0]}
+    release_lock
+    [ -n "$tmp" ] && rm -f "$tmp"
+    return "$rc"
+}
+
+# --------------------------------------------------------------------------- #
+# Approval poller: consumes <host>.workorder.json files
+# --------------------------------------------------------------------------- #
+
+# Write a one-host inventory (honouring a host_vars root override). Used by
+# apply/reboot/recheck so they don't depend on the main hosts.yml being current
+# — a host onboarded via Rescan isn't in hosts.yml until the next full cycle.
+write_host_inventory() {
+    local host=$1 inv=$2 user=cameron
+    local hv="$ANSIBLE_DIR/host_vars/${host}.yml"
+    [ -f "$hv" ] && grep -q 'ansible_user: root' "$hv" && user=root
+    printf 'all:\n  hosts:\n    %s:\n      ansible_user: %s\n' "$host" "$user" > "$inv"
+}
+
+set_host_error() {
+    local host=$1 f="$REPORTS_DIR/${1}_update_result.json"
+    [ -f "$f" ] || return 0
+    local tmp; tmp=$(jq '.status="error"' "$f" 2>/dev/null) && echo "$tmp" > "$f"
+}
+
+process_workorder() {
+    local wo=$1
+    local host action packages source rc queue_reboot=0
+    host=$(jq -r '.hostname' "$wo")
+    action=$(jq -r '.action' "$wo")
+    packages=$(jq -r '(.packages // []) | join(",")' "$wo")
+    source=$(jq -r '.source // "dashboard"' "$wo")
+
+    if [ -z "$host" ] || [ "$host" = "null" ]; then
+        log "Skipping malformed work order $wo"; rm -f "$wo"; return
+    fi
+
+    if [ "$action" = "recheck" ]; then
+        log "Rechecking $host (requested via dashboard)"
+        touch "$LOCK_FILE"
+        if recheck_host "$host"; then
+            log "Recheck succeeded for $host"
+            python3 /scripts/audit.py --action recheck --host "$host" \
+                --source "$source" --result success --detail "rescanned" || true
+        else
+            log "Recheck for $host: host still not ready (see needs_setup)"
+            python3 /scripts/audit.py --action recheck --host "$host" \
+                --source "$source" --result failure --detail "still not ready" || true
+        fi
+        rm -f "$LOCK_FILE"
+        rm -f "$wo"
+        return
+    fi
+
+    log "Processing $action work order for $host (packages: ${packages:-none})"
+    local inv="/tmp/wo_${host}.yml"
+    write_host_inventory "$host" "$inv"
+    touch "$LOCK_FILE"
+    acquire_lock
+    if [ "$action" = "apply" ]; then
+        ansible-playbook "$ANSIBLE_DIR/apply-updates-playbook.yml" -i "$inv" \
+            -l "$host" -e "packages=$packages" 2>&1 | tee -a "$LOG_FILE"
+        rc=${PIPESTATUS[0]}
+    elif [ "$action" = "reboot" ]; then
+        ansible-playbook "$ANSIBLE_DIR/reboot-playbook.yml" -i "$inv" \
+            -l "$host" 2>&1 | tee -a "$LOG_FILE"
+        rc=${PIPESTATUS[0]}
+    else
+        log "Unknown action '$action' in $wo"; release_lock; rm -f "$LOCK_FILE" "$inv"; rm -f "$wo"; return
+    fi
+    release_lock
+    rm -f "$inv"
+
+    if [ "$rc" -eq 0 ]; then
+        log "$action succeeded for $host"
+        python3 /scripts/audit.py --action "$action" --host "$host" \
+            --packages "$packages" --source "$source" --result success --detail "rc=0" || true
+        python3 /scripts/slack_notifier.py --action "$action" --host "$host" \
+            --packages "$packages" --result success 2>&1 | tee -a "$LOG_FILE" || true
+        run_check "$host" || true   # refresh this host's available-updates list
+        # Auto-reboot: if this host is flagged and the fresh check says a reboot is
+        # needed, remember to queue one (written below, after this work order is
+        # removed, since both share the <host>.workorder.json path).
+        if [ "$action" = "apply" ] && is_auto_reboot "$host" \
+           && [ "$(jq -r '.reboot_required' "$REPORTS_DIR/${host}_update_result.json" 2>/dev/null)" = "true" ]; then
+            queue_reboot=1
+        fi
+    else
+        log "$action FAILED for $host (rc=$rc)"
+        python3 /scripts/audit.py --action "$action" --host "$host" \
+            --packages "$packages" --source "$source" --result failure --detail "rc=$rc" || true
+        python3 /scripts/slack_notifier.py --action "$action" --host "$host" \
+            --packages "$packages" --result failure 2>&1 | tee -a "$LOG_FILE" || true
+        set_host_error "$host"
+    fi
+    rm -f "$LOCK_FILE"
+    rm -f "$wo"
+    if [ "${queue_reboot:-0}" = "1" ]; then
+        log "Auto-reboot: queuing reboot for $host"
+        jq -n --arg h "$host" \
+            '{hostname:$h, action:"reboot", packages:[], requested_at:(now|todate), status:"pending", source:"auto"}' \
+            > "$REPORTS_DIR/${host}.workorder.json"
     fi
 }
 
-TRIGGER_FILE="/tmp/trigger_scan"
-LOCK_FILE="/tmp/scan_running"
+poller_loop() {
+    set +e   # a failed work order must never kill the poller
+    log "Approval poller started (every ${POLL_INTERVAL}s)"
+    while true; do
+        for wo in "$REPORTS_DIR"/*.workorder.json; do
+            [ -e "$wo" ] || continue
+            [ "$(jq -r '.status' "$wo" 2>/dev/null)" = "pending" ] || continue
+            process_workorder "$wo"
+        done
+        sleep "$POLL_INTERVAL"
+    done
+}
 
+# Queue an apply of all available packages for one host.
+autoqueue_host() {
+    local host=$1 reason=$2 f="$REPORTS_DIR/${1}_update_result.json"
+    [ -e "$f" ] || return 0
+    local pkgs
+    pkgs=$(jq -r '[.available_packages[].name] | join(",")' "$f")
+    [ -z "$pkgs" ] && return 0
+    log "Auto-queuing $host ($reason)"
+    jq -n --arg h "$host" --arg p "$pkgs" \
+        '{hostname:$h, action:"apply", packages:($p|split(",")), requested_at:(now|todate), status:"pending", source:"auto"}' \
+        > "$REPORTS_DIR/${host}.workorder.json"
+}
+
+# When approval is disabled globally, auto-queue every host.
+autoqueue_all() {
+    for f in "$REPORTS_DIR"/*_update_result.json; do
+        [ -e "$f" ] || continue
+        autoqueue_host "$(jq -r '.hostname' "$f")" "REQUIRE_APPROVAL=false"
+    done
+}
+
+AUTO_FILE="$REPORTS_DIR/auto_update.json"
+
+# Auto-queue only the hosts the operator flagged for automatic updates.
+autoqueue_marked() {
+    [ -f "$AUTO_FILE" ] || return 0
+    local host
+    # ".update" is the current key; ".hosts" is the legacy one.
+    for host in $(jq -r '(.update // .hosts // [])[]?' "$AUTO_FILE" 2>/dev/null); do
+        autoqueue_host "$host" "auto-update enabled"
+    done
+}
+
+# Is this host flagged for automatic reboot after updates?
+is_auto_reboot() {
+    [ -f "$AUTO_FILE" ] || return 1
+    jq -e --arg h "$1" '(.reboot // []) | index($h)' "$AUTO_FILE" >/dev/null 2>&1
+}
+
+# --------------------------------------------------------------------------- #
+# A single check cycle (discover -> inventory -> check -> report)
+# --------------------------------------------------------------------------- #
 run_cycle() {
     touch "$LOCK_FILE"
     log "================================"
-    log "Starting update cycle"
+    log "Starting check cycle"
     log "================================"
 
     if HOSTS=$(discover_systems); then
-        generate_inventory "$HOSTS"
-        run_updates
+        if generate_inventory "$HOSTS"; then
+            run_check "" || log "Check playbook returned non-zero"
+            if [ "$REQUIRE_APPROVAL" = "false" ]; then
+                autoqueue_all
+            else
+                autoqueue_marked
+            fi
+            python3 /scripts/generate_reports.py 2>&1 | tee -a "$LOG_FILE" || true
+            python3 /scripts/slack_notifier.py 2>&1 | tee -a "$LOG_FILE" || true
+        else
+            log "No reachable hosts after inventory generation"
+        fi
     else
-        log "Skipping updates - no hosts discovered"
+        log "Skipping check - no hosts discovered"
     fi
 
     rm -f "$LOCK_FILE"
-    log "Update cycle completed. Next cycle in $UPDATE_INTERVAL seconds"
+    log "Check cycle completed. Next cycle in $UPDATE_INTERVAL seconds"
 }
 
-# Main loop
+# --------------------------------------------------------------------------- #
+# Boot: poller in background, then the check loop (early-wake on Scan Now)
+# --------------------------------------------------------------------------- #
+poller_loop &
+
 while true; do
     rm -f "$TRIGGER_FILE"
     run_cycle
 
-    # Sleep, but wake early if the web UI drops a trigger file
     elapsed=0
     while [ "$elapsed" -lt "$UPDATE_INTERVAL" ]; do
         sleep 10

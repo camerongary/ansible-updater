@@ -2,7 +2,7 @@
 
 ## ✅ Your Slack Webhook is Configured!
 
-**Workspace**: T0ALY7FCQ6P
+**Workspace**: YOUR_WORKSPACE_ID
 **Webhook URL**: `https://hooks.slack.com/services/YOUR/WEBHOOK/URL`
 
 ---

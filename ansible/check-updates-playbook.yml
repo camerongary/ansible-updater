@@ -1,0 +1,218 @@
+---
+# Check phase: gather the list of available updates per host WITHOUT applying anything.
+# Writes /reports/<host>_update_result.json (status: checked) via templates/host_result.json.j2.
+- name: Check for available updates (Debian and RedHat)
+  hosts: all
+  gather_facts: yes
+  vars:
+    check_status: checked
+
+  pre_tasks:
+    - name: Initialize check facts
+      set_fact:
+        upgradable_lines: []
+        security_names: []
+        pkg_reboot_required: false
+        check_status: checked
+        check_note: ""
+        release_upgrade: ""
+
+  tasks:
+    # ---------- DEBIAN / UBUNTU ----------
+    - name: Debian - refresh apt cache (no upgrade)
+      apt:
+        update_cache: yes
+        cache_valid_time: 600
+      when: ansible_os_family == "Debian"
+
+    - name: Debian - list upgradable packages
+      shell: apt list --upgradable 2>/dev/null | tail -n +2
+      register: debian_upgradable
+      changed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Debian - record upgradable lines
+      set_fact:
+        upgradable_lines: "{{ debian_upgradable.stdout_lines }}"
+      when: ansible_os_family == "Debian"
+
+    - name: Debian - check if reboot required
+      stat:
+        path: /var/run/reboot-required
+      register: debian_reboot_required
+      when: ansible_os_family == "Debian"
+
+    - name: Debian - set reboot flag
+      set_fact:
+        pkg_reboot_required: true
+      when:
+        - ansible_os_family == "Debian"
+        - debian_reboot_required.stat.exists
+
+    - name: Debian - check for an OS release upgrade (Ubuntu)
+      # do-release-upgrade -c reports a new distro release (e.g. 25.04 -> 25.10).
+      # Debian proper has no do-release-upgrade, so guard on its presence. This is
+      # detection only — the release upgrade itself stays a manual operation.
+      shell: |
+        if command -v do-release-upgrade >/dev/null 2>&1; then
+          out=$(do-release-upgrade -c 2>&1 || true)
+          rel=$(printf '%s' "$out" | sed -nE "s/.*New release '([^']+)' available.*/\1/p" | head -1)
+          if [ -n "$rel" ]; then
+            printf '%s' "$out" | grep -qi 'not supported anymore' \
+              && echo "Upgrade to $rel — current release is end-of-life" \
+              || echo "Upgrade to $rel available"
+          fi
+        fi
+      register: debian_relupg
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Debian - record release upgrade
+      set_fact:
+        release_upgrade: "{{ debian_relupg.stdout | default('') | trim }}"
+      when: ansible_os_family == "Debian"
+
+    # ---------- DNF (Fedora / RHEL 8+ / Rocky / Alma) ----------
+    - name: dnf - check for enabled repositories
+      # The dnf module returns "Nothing to do" (success) even with no repos, so a
+      # host with no repos would look "up to date". Detect that explicitly: with
+      # no enabled repos, dnf prints "No repositories available".
+      shell: dnf repolist --enabled 2>&1 | grep -qiE 'No repositories available' && echo NOREPOS || echo OK
+      register: redhat_repos
+      changed_when: false
+      failed_when: false
+      when: ansible_pkg_mgr == "dnf"
+
+    - name: dnf - refresh cache (no upgrade)
+      command: dnf -q makecache
+      changed_when: false
+      failed_when: false
+      when: ansible_pkg_mgr == "dnf"
+
+    - name: dnf - compute upgrade transaction (check mode, no changes)
+      # Use the dnf module in check mode rather than `check-update`: it runs the
+      # real depsolve, so it includes obsoletes/replacements and dependency
+      # installs that `dnf upgrade` performs (e.g. noopenh264 -> openh264) which
+      # `check-update` never reports. Native module = no shell-quoting/escape
+      # issues. Returns results like "Installed: openh264-2.6.0-3.fc44.x86_64".
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+      check_mode: yes
+      register: redhat_upgrade
+      ignore_errors: yes   # keep going AND keep .failed set so we can flag it
+      when: ansible_pkg_mgr == "dnf"
+
+    - name: dnf - flag a failed check (e.g. unregistered / no enabled repos)
+      set_fact:
+        check_status: check_failed
+        check_note: >-
+          {{ 'No enabled repositories — the host may be unregistered (RHEL needs a subscription) or have no repos configured.'
+             if ('NOREPOS' in (redhat_repos.stdout | default('')))
+             else (redhat_upgrade.msg | default('dnf could not query updates') | regex_replace('\\s+', ' ') | truncate(220)) }}
+      when:
+        - ansible_pkg_mgr == "dnf"
+        - (redhat_upgrade.failed | default(false)) or ('NOREPOS' in (redhat_repos.stdout | default('')))
+
+    - name: dnf - record upgradable lines
+      # Keep the packages being added/upgraded (drop Removed/Obsoleted), and
+      # reshape "Verb: name-ver-rel.arch" into the "name.arch version" the
+      # template expects.
+      set_fact:
+        upgradable_lines: >-
+          {{ redhat_upgrade.results | default([])
+             | select('match', '^(Installed|Updated|Upgraded): ')
+             | map('regex_replace', '^\w+: (.+)-([^-]+-[^-]+)\.([^.]+)$', '\1.\3 \2')
+             | list }}
+      when:
+        - ansible_pkg_mgr == "dnf"
+        - not (redhat_upgrade.failed | default(false))
+
+    - name: dnf - list security update package names
+      shell: |
+        dnf -q updateinfo list --security 2>/dev/null \
+          | grep -oE '[A-Za-z0-9._+:-]+\.(x86_64|noarch|i686|aarch64|s390x|ppc64le)' \
+          | sed -E 's/-[0-9].*//' | sort -u
+      register: redhat_security
+      changed_when: false
+      ignore_errors: yes
+      when: ansible_pkg_mgr == "dnf"
+
+    - name: dnf - record security names
+      set_fact:
+        security_names: "{{ redhat_security.stdout_lines | reject('equalto', '') | list }}"
+      when:
+        - ansible_pkg_mgr == "dnf"
+        - redhat_security is succeeded
+
+    # ---------- YUM (CentOS 7 / XCP-ng) ----------
+    # XCP-ng/CentOS 7 use yum and lack the dnf/yum python bindings, so shell out.
+    - name: yum - list upgradable packages
+      # `yum check-update` exits 100 when updates exist; -q gives clean
+      # "name.arch  version  repo" lines. Emit "name.arch version".
+      shell: yum -q check-update 2>/dev/null | awk 'NF>=3 && $1 ~ /\./ {print $1, $2}'
+      register: yum_upgradable
+      changed_when: false
+      failed_when: false
+      when: ansible_pkg_mgr == "yum"
+
+    - name: yum - record upgradable lines
+      set_fact:
+        upgradable_lines: "{{ yum_upgradable.stdout_lines | reject('equalto', '') | list }}"
+      when: ansible_pkg_mgr == "yum"
+
+    - name: yum - list security update package names (best effort)
+      shell: |
+        yum -q updateinfo list security 2>/dev/null \
+          | awk '{print $NF}' | sed -E 's/-[0-9].*//' | sort -u
+      register: yum_security
+      changed_when: false
+      failed_when: false
+      when: ansible_pkg_mgr == "yum"
+
+    - name: yum - record security names
+      set_fact:
+        security_names: "{{ yum_security.stdout_lines | reject('equalto', '') | list }}"
+      when:
+        - ansible_pkg_mgr == "yum"
+        - yum_security.stdout_lines is defined
+
+    - name: RPM - determine if reboot is required
+      # Prefer needs-restarting (dnf-utils). Otherwise a reboot is needed if a
+      # kernel or hypervisor package was installed *after* the last boot. This is
+      # robust even on XCP-ng, where `uname -r` (e.g. 4.19.0+1) never matches the
+      # kernel rpm version, so a uname-vs-rpm string compare false-positives
+      # forever. It also clears correctly once the host is rebooted.
+      shell: |
+        if command -v needs-restarting >/dev/null 2>&1; then
+          needs-restarting -r >/dev/null 2>&1 && echo no_reboot || echo reboot_required
+        else
+          boot=$(date -d "$(uptime -s)" +%s 2>/dev/null || echo 0)
+          newest=$(rpm -q --qf '%{INSTALLTIME}\n' kernel kernel-core xen-hypervisor 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1)
+          if [ -n "$newest" ] && [ "$newest" -gt "$boot" ]; then echo reboot_required; else echo no_reboot; fi
+        fi
+      register: redhat_reboot_check
+      changed_when: false
+      failed_when: false
+      when: ansible_pkg_mgr in ["yum", "dnf"]
+
+    - name: RPM - set reboot flag
+      set_fact:
+        pkg_reboot_required: "{{ 'reboot_required' in (redhat_reboot_check.stdout | default('')) }}"
+      when: ansible_pkg_mgr in ["yum", "dnf"]
+
+  post_tasks:
+    - name: Write per-host result JSON
+      template:
+        src: templates/host_result.json.j2
+        dest: "/reports/{{ inventory_hostname }}_update_result.json"
+      delegate_to: localhost
+      become: false
+
+    - name: Show check summary
+      debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_distribution }} {{ ansible_distribution_version }}):
+          {{ upgradable_lines | length }} updates available,
+          reboot required = {{ pkg_reboot_required }}

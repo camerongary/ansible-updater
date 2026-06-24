@@ -1,0 +1,50 @@
+{#
+  Renders a host's update-check result as JSON.
+  Expects these facts/vars to be set by the calling playbook:
+    upgradable_lines   - list of raw "apt list --upgradable" or "dnf check-update" lines
+    security_names     - list of package base-names that are security updates
+    pkg_reboot_required- bool, whether the host needs a reboot
+    check_status       - status string ("checked" by default)
+  Plus standard gathered facts (ansible_os_family, ansible_distribution, etc.).
+#}
+{%- set ns = namespace(pkgs=[]) -%}
+{%- for raw in upgradable_lines -%}
+  {%- set line = raw | trim -%}
+  {%- if line and (ansible_os_family == "Debian") and ('/' in line) and ('upgradable from:' in line) -%}
+    {#- e.g. openssl/jammy-security 1.1.1f-2.19 amd64 [upgradable from: 1.1.1f-2.18] -#}
+    {%- set parts = line.split() -%}
+    {%- set name = parts[0].split('/')[0] -%}
+    {%- set repo = parts[0].split('/')[1] -%}
+    {%- set new_version = parts[1] -%}
+    {%- set current_version = (line.split('upgradable from:')[1] | trim | replace(']', '') | trim) -%}
+    {%- set is_security = ('security' in repo) or (name in security_names) -%}
+    {%- set _ = ns.pkgs.append({'name': name, 'current_version': current_version, 'new_version': new_version, 'security': is_security}) -%}
+  {%- elif line and (ansible_os_family != "Debian") and (line.split() | length >= 2) -%}
+    {#- "name.arch version" from dnf check-mode or yum check-update (RedHat / XCP-ng) -#}
+    {%- set parts = line.split() -%}
+    {%- set name = parts[0] -%}
+    {%- set base = name.split('.')[0] -%}
+    {%- set new_version = parts[1] -%}
+    {%- set is_security = (base in security_names) or (name in security_names) -%}
+    {%- set _ = ns.pkgs.append({'name': name, 'current_version': 'installed', 'new_version': new_version, 'security': is_security}) -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- set security_count = ns.pkgs | selectattr('security') | list | length -%}
+{
+  "hostname": {{ inventory_hostname | to_json }},
+  "display_name": {{ (ansible_hostname | default(inventory_hostname)) | to_json }},
+  "ip_address": {{ (ansible_default_ipv4.address | default('N/A')) | to_json }},
+  "os_family": {{ ansible_os_family | to_json }},
+  "os_name": {{ (ansible_distribution ~ ' ' ~ ansible_distribution_version) | to_json }},
+  "kernel": {{ ansible_kernel | to_json }},
+  "timestamp": {{ ansible_date_time.iso8601 | to_json }},
+  "updates_available": {{ ns.pkgs | length }},
+  "security_updates": {{ security_count }},
+  "reboot_required": {{ pkg_reboot_required | bool | to_json }},
+  "status": {{ (check_status | default('checked')) | to_json }},
+  "setup_reason": {{ (check_note | default('')) | to_json }},
+  "release_upgrade": {{ (release_upgrade | default('')) | to_json }},
+  "last_applied": {{ (last_applied | default(none)) | to_json }},
+  "applied_packages": {{ (applied_packages | default([])) | to_json }},
+  "available_packages": {{ ns.pkgs | to_json }}
+}

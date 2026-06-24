@@ -37,7 +37,7 @@ open http://localhost
 
 ### Your Configuration
 ```
-Workspace:  T0ALY7FCQ6P
+Workspace:  YOUR_WORKSPACE_ID
 Webhook:    https://hooks.slack.com/services/YOUR/WEBHOOK/URL
 Status:     ✅ CONFIGURED & READY
 ```

@@ -1,0 +1,23 @@
+---
+# Reboot phase: reboot the targeted host(s). Separately approved from updates.
+# Run limited to one host, e.g.:
+#   ansible-playbook reboot-playbook.yml -i hosts.yml -l 192.168.12.10
+- name: Reboot approved host
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Reboot the host
+      reboot:
+        msg: "Reboot approved via the update dashboard"
+        connect_timeout: 5
+        reboot_timeout: 600
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+
+    - name: Confirm host is back
+      ping:
+
+    - name: Show reboot summary
+      debug:
+        msg: "{{ inventory_hostname }}: reboot completed."

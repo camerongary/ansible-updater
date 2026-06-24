@@ -1,0 +1,77 @@
+---
+# Apply phase: install ONLY the approved packages on the targeted host(s).
+# Run limited to one host with the approved package list, e.g.:
+#   ansible-playbook apply-updates-playbook.yml -i hosts.yml \
+#       -l 192.168.12.10 -e 'packages=openssl,bash'
+# Never reboots (reboot is a separate, separately-approved action).
+- name: Apply approved updates
+  hosts: all
+  gather_facts: yes
+  vars:
+    packages: ""        # comma-separated approved package names
+    apply_timestamp: "{{ ansible_date_time.iso8601 | default('') }}"
+
+  pre_tasks:
+    - name: Parse approved package list
+      set_fact:
+        approved_packages: "{{ packages.split(',') | map('trim') | reject('equalto', '') | list }}"
+
+    - name: Fail if no packages were approved
+      fail:
+        msg: "No packages provided to apply (pass -e 'packages=pkg1,pkg2')."
+      when: approved_packages | length == 0
+
+  tasks:
+    - name: Debian - install approved packages
+      apt:
+        name: "{{ approved_packages }}"
+        state: latest
+      when: ansible_os_family == "Debian"
+      register: debian_apply
+
+    - name: RPM - import distro GPG keys so signed packages validate
+      # dnf/yum (interactive) prompt to import repo keys on first use; the modules
+      # run non-interactively and won't, so signed packages fail GPG validation.
+      # Import the distro-provided keys (idempotent) — keeps gpgcheck on.
+      shell: rpm --import /etc/pki/rpm-gpg/* 2>/dev/null || true
+      changed_when: false
+      when: ansible_pkg_mgr in ["yum", "dnf"]
+
+    - name: dnf - install approved packages
+      dnf:
+        name: "{{ approved_packages }}"
+        state: latest
+      when: ansible_pkg_mgr == "dnf"
+      register: redhat_apply
+
+    - name: yum - install approved packages
+      # XCP-ng/CentOS 7 lack the python yum bindings, so shell out to yum.
+      shell: yum -y update {{ approved_packages | map('quote') | join(' ') }}
+      when: ansible_pkg_mgr == "yum"
+      register: yum_apply
+      changed_when: "'No packages marked for update' not in (yum_apply.stdout | default(''))"
+
+  post_tasks:
+    - name: Determine change result
+      set_fact:
+        apply_changed: "{{ (debian_apply.changed | default(false)) or (redhat_apply.changed | default(false)) or (yum_apply.changed | default(false)) }}"
+
+    - name: Write apply history record
+      copy:
+        content: "{{ apply_record | to_nice_json }}"
+        dest: "/reports/{{ inventory_hostname }}_apply_{{ ansible_date_time.iso8601_basic_short }}.json"
+      vars:
+        apply_record:
+          hostname: "{{ inventory_hostname }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          os_family: "{{ ansible_os_family }}"
+          requested_packages: "{{ approved_packages }}"
+          changed: "{{ apply_changed }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Show apply summary
+      debug:
+        msg: >-
+          {{ inventory_hostname }}: applied {{ approved_packages | length }}
+          package(s); changed = {{ apply_changed }}

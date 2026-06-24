@@ -259,7 +259,7 @@ Logging:              ✅ ACTIVE
 cat .env
 # Should show:
 # NETWORK_RANGE=192.168.12.0/24
-# SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL...
+# SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 ```
 
 ### 2. Build
