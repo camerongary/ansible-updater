@@ -445,7 +445,10 @@ def api_remove(host):
     if not SAFE_HOST_RE.match(host or ""):
         abort(400, description="Invalid host")
     removed = False
-    for p in (result_path(host), workorder_path(host)):
+    paths = [result_path(host), workorder_path(host)]
+    # also drop apply-history records for this host so it's fully forgotten
+    paths += glob.glob(os.path.join(REPORTS_DIR, f"{host}_apply_*.json"))
+    for p in paths:
         try:
             if os.path.exists(p):
                 os.remove(p)
