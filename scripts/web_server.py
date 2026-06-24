@@ -214,6 +214,7 @@ def index():
                     <button class="copy-cmds-btn" onclick="copyCmds(this,'cmds-{hostname}')">{COPY_ICON} Copy commands</button>
                     <pre id="cmds-{hostname}" style="background:#2d2d2d;color:#eee;padding:14px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.5;">{cmds}</pre>
                     <button class="btn btn-rescan" onclick="recheck('{hostname}')">Rescan this host</button>
+                    <button class="btn btn-remove" onclick="removeHost('{hostname}')">Remove from dashboard</button>
                 </td>
             </tr>"""
         elif host.get("status") == "check_failed":
@@ -226,6 +227,7 @@ def index():
                     <p style="margin-bottom:10px;color:#666;font-size:13px;">Reason: <code>{reason}</code></p>
                     <p style="margin-bottom:12px;color:#666;font-size:13px;">A common cause is no enabled repositories (e.g. a RHEL host that isn't registered). Fix it on the host, then rescan.</p>
                     <button class="btn btn-rescan" onclick="recheck('{hostname}')">Rescan this host</button>
+                    <button class="btn btn-remove" onclick="removeHost('{hostname}')">Remove from dashboard</button>
                 </td>
             </tr>"""
         else:
@@ -271,6 +273,7 @@ def index():
                 f'<button class="btn btn-rescan" onclick="recheck(\'{hostname}\')">Rescan</button>'
                 f'{auto_btn}'
                 f'{autoreboot_btn}'
+                f'<button class="btn btn-remove" onclick="removeHost(\'{hostname}\')">Remove</button>'
                 f'</div>{auto_note}'
             )
             # For long lists, repeat the actions at the top so you don't have to
@@ -430,6 +433,32 @@ def api_reboot(host):
         }, f, indent=2)
     audit.append("reboot", host, source="dashboard", result="requested", detail="reboot queued")
     return jsonify({"ok": True})
+
+
+@app.route("/api/remove/<host>", methods=["POST"])
+def api_remove(host):
+    """Forget a host (e.g. a decommissioned VM): drop its result + work order +
+    auto-update settings so it stops showing on the dashboard."""
+    denied = require_auth()
+    if denied:
+        return denied
+    if not SAFE_HOST_RE.match(host or ""):
+        abort(400, description="Invalid host")
+    removed = False
+    for p in (result_path(host), workorder_path(host)):
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+                removed = True
+        except Exception as e:
+            print(f"remove: {e}")
+    upd, rbt = load_settings()
+    if host in upd or host in rbt:
+        upd.discard(host)
+        rbt.discard(host)
+        save_settings(upd, rbt)
+    audit.append("remove", host, source="dashboard", result="success", detail="removed from dashboard")
+    return jsonify({"ok": True, "removed": removed})
 
 
 @app.route("/api/autoupdate/<host>", methods=["POST"])
@@ -598,6 +627,7 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
 .btn-reject {{ background:#c62828; }}
 .btn-reboot {{ background:#f39c12; }}
 .btn-rescan {{ background:#667eea; }}
+.btn-remove {{ background:#fff; color:#c62828; border:1px solid #c62828; }}
 .btn-auto-on {{ background:#1a9d6e; }}
 .btn-auto-off {{ background:#fff; color:#1a9d6e; border:1px solid #1a9d6e; }}
 .btn-autoreboot-on {{ background:#b8860b; }}
@@ -887,6 +917,13 @@ function recheck(h) {{
   post('/api/recheck/' + h, {{}}).then(function(res){{
     if (!res.ok) {{ alert('Error: ' + (res.body.description || JSON.stringify(res.body))); return; }}
     alert('Rescan queued for ' + h + '. It runs within ~15s — refresh shortly.');
+  }});
+}}
+function removeHost(h) {{
+  if (!confirm('Remove ' + h + ' from the dashboard?\n\nUse this for a decommissioned host. If the host still exists and is reachable, it will reappear on the next scan.')) return;
+  post('/api/remove/' + h, {{}}).then(function(res){{
+    if (!res.ok) {{ alert('Error: ' + (res.body.description || JSON.stringify(res.body))); return; }}
+    location.reload();
   }});
 }}
 function setAuto(h, enabled) {{
