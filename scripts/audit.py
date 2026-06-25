@@ -20,7 +20,7 @@ from datetime import datetime
 REPORTS_DIR = os.environ.get("REPORTS_DIR", "/reports")
 AUDIT_LOG = os.path.join(REPORTS_DIR, "audit_log.jsonl")
 
-VALID_ACTIONS = {"approve", "reject", "apply", "reboot", "recheck", "autoupdate", "autoreboot", "remove"}
+VALID_ACTIONS = {"approve", "reject", "apply", "reboot", "recheck", "autoupdate", "autoreboot", "remove", "addhost"}
 VALID_RESULTS = {"requested", "success", "failure"}
 
 

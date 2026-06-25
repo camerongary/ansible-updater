@@ -21,6 +21,9 @@ import audit
 
 app = Flask(__name__)
 REPORTS_DIR = os.environ.get("REPORTS_DIR", "/reports")
+# Hosts added manually from the dashboard. start.sh merges these into every
+# discovery cycle so they're always managed, even if nmap can't see them.
+MANUAL_HOSTS_FILE = os.path.join(REPORTS_DIR, "manual_hosts.txt")
 
 # Files used to coordinate manual scans with the start.sh loop.
 TRIGGER_FILE = "/tmp/trigger_scan"
@@ -97,6 +100,26 @@ def save_settings(update_hosts, reboot_hosts):
             json.dump({"update": sorted(update_hosts), "reboot": sorted(reboot_hosts)}, f, indent=2)
     except Exception as e:
         print(f"Error writing {AUTO_FILE}: {e}")
+
+
+def load_manual_hosts():
+    try:
+        with open(MANUAL_HOSTS_FILE) as f:
+            return [ln.strip() for ln in f if ln.strip()]
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f"Error reading {MANUAL_HOSTS_FILE}: {e}")
+        return []
+
+
+def save_manual_hosts(hosts):
+    try:
+        with open(MANUAL_HOSTS_FILE, "w") as f:
+            for h in sorted(set(hosts)):
+                f.write(h + "\n")
+    except Exception as e:
+        print(f"Error writing {MANUAL_HOSTS_FILE}: {e}")
 
 
 def load_results():
@@ -460,8 +483,53 @@ def api_remove(host):
         upd.discard(host)
         rbt.discard(host)
         save_settings(upd, rbt)
+    # drop from manually-added hosts too, or it would return on the next cycle
+    manual = load_manual_hosts()
+    if host in manual:
+        save_manual_hosts([h for h in manual if h != host])
     audit.append("remove", host, source="dashboard", result="success", detail="removed from dashboard")
     return jsonify({"ok": True, "removed": removed})
+
+
+@app.route("/api/addhost", methods=["POST"])
+def api_addhost():
+    """Manually add one or more hosts (IPs/hostnames). They're persisted to
+    manual_hosts.txt (so every cycle checks them) and a check is queued for each
+    so they appear within ~15s."""
+    denied = require_auth()
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    raw = body.get("hosts", "")
+    tokens = raw if isinstance(raw, list) else re.split(r"[\s,]+", str(raw))
+    candidates = [t.strip() for t in tokens if t and t.strip()]
+    if not candidates:
+        abort(400, description="No hosts provided")
+    valid, invalid, seen = [], [], set()
+    for c in candidates:
+        if not SAFE_HOST_RE.match(c):
+            invalid.append(c)
+        elif c not in seen:
+            seen.add(c)
+            valid.append(c)
+    if not valid:
+        abort(400, description="No valid hosts (use IP addresses or hostnames)")
+    existing = set(load_manual_hosts())
+    added = [h for h in valid if h not in existing]
+    save_manual_hosts(existing | set(valid))
+    # queue an immediate check for each so they show up without waiting a cycle
+    for h in valid:
+        with open(workorder_path(h), "w") as f:
+            json.dump({
+                "hostname": h, "action": "recheck", "packages": [],
+                "requested_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "status": "pending", "source": "dashboard",
+            }, f, indent=2)
+    audit.append("addhost", ",".join(valid), source="dashboard", result="requested",
+                 detail=f"added {len(added)} new, queued {len(valid)} check(s)"
+                        + (f", ignored {len(invalid)} invalid" if invalid else ""))
+    return jsonify({"ok": True, "added": added, "queued": valid, "invalid": invalid,
+                    "already_present": [h for h in valid if h not in added]})
 
 
 @app.route("/api/autoupdate/<host>", methods=["POST"])
@@ -671,6 +739,7 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
     <h1>System Update Approvals</h1>
     <p>Last rendered: {now}</p>
     <button id="scanBtn" class="scan-btn">Scan Now</button>
+    <button id="addHostBtn" class="scan-btn" style="background:#1a9d6e;" onclick="showAddHost()">Add Host</button>
   </header>
   <div class="stats-grid">
     <div class="stat-card"><h3>Total Hosts</h3><div class="value">{stats[total_hosts]}</div></div>
@@ -713,6 +782,18 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
     <div class="login-actions">
       <button class="btn btn-approve" onclick="loginSubmit()">Log in</button>
       <button class="btn" style="background:#9aa0a6;" onclick="hideLogin(false)">Cancel</button>
+    </div>
+  </div>
+</div>
+<div id="addHostOverlay" class="login-overlay">
+  <div class="login-box" style="width:420px;">
+    <h3 style="margin-bottom:6px;color:#333;">Add host(s)</h3>
+    <p style="color:#666;font-size:13px;margin-bottom:6px;">Enter one or more IP addresses or hostnames — one per line (or separated by spaces/commas). Each is checked over SSH within ~15s and added to every scan cycle.</p>
+    <textarea id="addHostInput" class="login-input" rows="6" placeholder="192.168.12.50&#10;192.168.12.51&#10;server.local" style="resize:vertical;font-family:monospace;" onkeydown="addHostKey(event)"></textarea>
+    <div id="addHostErr" class="login-err"></div>
+    <div class="login-actions">
+      <button class="btn btn-approve" onclick="addHostSubmit()">Add</button>
+      <button class="btn" style="background:#9aa0a6;" onclick="hideAddHost()">Cancel</button>
     </div>
   </div>
 </div>
@@ -927,6 +1008,30 @@ function removeHost(h) {{
   post('/api/remove/' + h, {{}}).then(function(res){{
     if (!res.ok) {{ alert('Error: ' + (res.body.description || JSON.stringify(res.body))); return; }}
     location.reload();
+  }});
+}}
+function showAddHost() {{
+  document.getElementById('addHostErr').textContent = '';
+  document.getElementById('addHostInput').value = '';
+  document.getElementById('addHostOverlay').style.display = 'flex';
+  document.getElementById('addHostInput').focus();
+}}
+function hideAddHost() {{ document.getElementById('addHostOverlay').style.display = 'none'; }}
+function addHostKey(e) {{
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {{ addHostSubmit(); }}
+  else if (e.key === 'Escape') {{ hideAddHost(); }}
+}}
+function addHostSubmit() {{
+  var val = document.getElementById('addHostInput').value.trim();
+  if (!val) {{ document.getElementById('addHostErr').textContent = 'Enter at least one host.'; return; }}
+  post('/api/addhost', {{hosts: val}}).then(function(res){{
+    if (!res.ok) {{ document.getElementById('addHostErr').textContent = 'Error: ' + (res.body.description || JSON.stringify(res.body)); return; }}
+    var b = res.body || {{}};
+    var q = (b.queued || []).length;
+    var msg = 'Queued ' + q + ' host(s) for checking.';
+    if (b.invalid && b.invalid.length) msg += '\\nIgnored invalid: ' + b.invalid.join(', ');
+    hideAddHost();
+    alert(msg + '\\nThey will appear within ~15s — refresh shortly.');
   }});
 }}
 function setAuto(h, enabled) {{

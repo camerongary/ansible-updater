@@ -69,12 +69,24 @@ discover_systems() {
 
     nmap -sn "$NETWORK_RANGE" -oG - | grep "Up" | awk '{print $2}' > /tmp/live_hosts.txt
 
+    # Merge manually-added hosts (added from the dashboard). This ensures hosts
+    # outside the scan range, or that don't answer the nmap ping sweep, are still
+    # managed on every cycle.
+    MANUAL_FILE="$REPORTS_DIR/manual_hosts.txt"
+    if [ -f "$MANUAL_FILE" ]; then
+        grep -vE '^[[:space:]]*$' "$MANUAL_FILE" >> /tmp/live_hosts.txt || true
+    fi
+
     # Filter out excluded hosts if exclude list exists
     EXCLUDE_FILE="$ANSIBLE_DIR/exclude_hosts.txt"
     if [ -f "$EXCLUDE_FILE" ]; then
         grep -vxFf "$EXCLUDE_FILE" /tmp/live_hosts.txt > /tmp/filtered_hosts.txt || true
         mv /tmp/filtered_hosts.txt /tmp/live_hosts.txt
     fi
+
+    # De-duplicate (manual hosts may overlap discovered ones) and drop blanks.
+    sort -u /tmp/live_hosts.txt | grep -vE '^[[:space:]]*$' > /tmp/live_hosts.dedup || true
+    mv /tmp/live_hosts.dedup /tmp/live_hosts.txt
 
     HOSTS=$(cat /tmp/live_hosts.txt | tr '\n' ',' | sed 's/,$//')
 
