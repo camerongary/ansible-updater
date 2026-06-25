@@ -923,7 +923,7 @@ function recheck(h) {{
   }});
 }}
 function removeHost(h) {{
-  if (!confirm('Remove ' + h + ' from the dashboard?\n\nUse this for a decommissioned host. If the host still exists and is reachable, it will reappear on the next scan.')) return;
+  if (!confirm('Remove ' + h + ' from the dashboard?\\n\\nUse this for a decommissioned host. If the host still exists and is reachable, it will reappear on the next scan.')) return;
   post('/api/remove/' + h, {{}}).then(function(res){{
     if (!res.ok) {{ alert('Error: ' + (res.body.description || JSON.stringify(res.body))); return; }}
     location.reload();
