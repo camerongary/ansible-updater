@@ -383,7 +383,22 @@ def api_audit():
         limit = int(request.args.get("limit", 50))
     except ValueError:
         limit = 50
-    return jsonify(audit.read(limit=max(1, min(limit, 500))))
+    records = audit.read(limit=max(1, min(limit, 500)))
+    # Enrich each record with the host's friendly name so the activity log can
+    # show hostname + IP (the audit log only stores the IP/inventory name).
+    namemap = {}
+    for r in load_results():
+        dn = r.get("display_name")
+        if not dn:
+            continue
+        for key in (r.get("hostname"), r.get("ip_address")):
+            if key:
+                namemap[key] = dn
+    for rec in records:
+        dn = namemap.get(rec.get("host", ""))
+        if dn:
+            rec["display_name"] = dn
+    return jsonify(records)
 
 
 @app.route("/api/approve/<host>", methods=["POST"])
@@ -708,7 +723,13 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
 .empty {{ text-align:center; padding:30px; color:#999; }}
 .audit-item {{ display:flex; gap:14px; align-items:center; padding:10px 30px; border-bottom:1px solid #f0f0f0; font-size:13px; }}
 .audit-ts {{ color:#999; font-family:monospace; font-size:12px; min-width:150px; }}
-.audit-host {{ font-weight:600; color:#333; min-width:140px; }}
+.audit-host {{ font-weight:600; color:#333; min-width:200px; }}
+.audit-ip {{ font-weight:400; color:#888; font-family:monospace; font-size:12px; }}
+.audit-item.expandable {{ cursor:pointer; }}
+.audit-item.expandable:hover {{ background:#fafafa; }}
+.audit-caret {{ color:#bbb; width:12px; display:inline-block; }}
+.audit-pkgs {{ padding:8px 30px 12px 56px; background:#fafafa; border-bottom:1px solid #f0f0f0; font-size:12px; color:#444; line-height:1.7; }}
+.audit-pkgs .pk {{ display:inline-block; background:#eef; border:1px solid #dde; border-radius:4px; padding:1px 7px; margin:2px 4px 2px 0; font-family:monospace; }}
 .footer {{ text-align:center; margin-top:10px; color:#fff; font-size:13px; }}
 .auth-area {{ float:right; font-size:13px; }}
 .auth-area .signed {{ color:#666; margin-right:10px; }}
@@ -1052,17 +1073,40 @@ function badge(result) {{
   var cls = result === 'success' ? 'status-success' : result === 'failure' ? 'status-danger' : 'status-info';
   return '<span class="status-badge ' + cls + '">' + result + '</span>';
 }}
+function toggleAudit(idx) {{
+  var el = document.getElementById('audit-pkgs-' + idx);
+  if (!el) return;
+  var open = el.style.display === 'none';
+  el.style.display = open ? 'block' : 'none';
+  var caret = el.previousElementSibling.querySelector('.audit-caret');
+  if (caret) caret.innerHTML = open ? '&#9662;' : '&#9656;';
+}}
 function loadAudit() {{
   fetch('/api/audit?limit=50').then(function(r){{ return r.json(); }}).then(function(items){{
     var c = document.getElementById('audit');
     if (!items.length) {{ c.innerHTML = '<p class="empty">No activity yet.</p>'; return; }}
-    c.innerHTML = items.map(function(it){{
-      var pk = (it.packages && it.packages.length) ? (it.packages.length + ' pkg') : '';
-      return '<div class="audit-item"><span class="audit-ts">' + it.ts + '</span>' +
+    c.innerHTML = items.map(function(it, idx){{
+      var hasPkgs = it.packages && it.packages.length;
+      var pk = hasPkgs ? (it.packages.length + ' pkg') : '';
+      // Show hostname and IP when we know the friendly name; fall back to IP only.
+      var nameHtml = (it.display_name && it.display_name !== it.host)
+        ? (it.display_name + ' <span class="audit-ip">' + it.host + '</span>')
+        : it.host;
+      var caret = hasPkgs ? '<span class="audit-caret">&#9656;</span>' : '<span class="audit-caret"></span>';
+      var row = '<div class="audit-item' + (hasPkgs ? ' expandable" onclick="toggleAudit(' + idx + ')"' : '"') + '>' +
+        caret +
+        '<span class="audit-ts">' + it.ts + '</span>' +
         '<span class="status-badge status-info">' + it.action + '</span>' +
-        '<span class="audit-host">' + it.host + '</span>' +
+        '<span class="audit-host">' + nameHtml + '</span>' +
         '<span>' + pk + '</span>' + badge(it.result) +
         '<span style="color:#999;">' + (it.detail || '') + '</span></div>';
+      if (hasPkgs) {{
+        var label = it.action === 'apply' ? (it.result === 'success' ? 'Applied' : 'Attempted') : 'Packages';
+        var chips = it.packages.map(function(p){{ return '<span class="pk">' + p + '</span>'; }}).join('');
+        row += '<div class="audit-pkgs" id="audit-pkgs-' + idx + '" style="display:none;">' +
+               '<strong>' + label + ' (' + it.packages.length + '):</strong> ' + chips + '</div>';
+      }}
+      return row;
     }}).join('');
   }});
 }}
