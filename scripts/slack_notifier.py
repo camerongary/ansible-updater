@@ -20,13 +20,13 @@ def load_latest_results():
         return []
     
     results = []
-    for json_file in sorted(json_files, reverse=True)[:10]:  # Get last 10
+    for json_file in sorted(json_files):  # all hosts — counts/totals must be complete
         try:
             with open(json_file, 'r') as f:
                 results.append(json.load(f))
         except Exception as e:
             print(f"Error loading {json_file}: {e}", file=sys.stderr)
-    
+
     return results
 
 def build_slack_message(results):
