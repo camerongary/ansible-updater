@@ -36,7 +36,12 @@ log and shown in the dashboard's "Recent Activity" panel.
 
 - **Multi-distribution** — Debian/Ubuntu (apt), RedHat/Fedora (dnf/dnf5), and yum-based (CentOS 7 / XCP-ng)
 - **Automatic discovery & onboarding** — periodic nmap scans; new hosts are bootstrapped
-  (SSH key + passwordless sudo) automatically where possible
+  (SSH key copied in — the `ssh-copy-id` equivalent — plus passwordless sudo) automatically
+  where possible
+- **Manual host add (single & bulk)** — add hosts by IP/hostname from the dashboard; they're
+  persisted and checked every cycle even if nmap can't see them
+- **Remove from dashboard** — forget a decommissioned host (clears its result, work order,
+  auto-update settings, and manual-host entry)
 - **Per-package approval** — choose exactly which packages to install on each host
 - **Per-host auto-update / auto-reboot** — flag trusted hosts to patch (and optionally reboot) themselves
 - **Separate reboot approval** — reboot a host only when you say so
@@ -48,7 +53,9 @@ log and shown in the dashboard's "Recent Activity" panel.
 - **Dashboard authentication** — viewing is open; actions require login (Basic Auth)
 - **Audit log** — append-only JSONL trail of every action, surfaced in the UI
 - **Slack integration** — cycle summaries plus per-host apply/reboot notifications
-- **Dashboard niceties** — sortable columns, copy-to-clipboard IPs, signed-in indicator
+- **Dashboard niceties** — sortable columns, copy-to-clipboard IPs and command snippets,
+  signed-in indicator; the activity log shows hostname + IP and expands to reveal the
+  packages applied per action
 - **Containerized** — single Docker Compose service (Ansible + dashboard)
 
 ## Architecture
@@ -168,9 +175,15 @@ require Basic Auth.
 
 ## Host onboarding & states
 
-New hosts are discovered automatically. A host is managed once it's reachable by the SSH key
-**and** has passwordless sudo. Hosts the system can't fully use are surfaced on the dashboard
-rather than hidden:
+Hosts come from two places: **automatic discovery** (each cycle's nmap sweep of
+`NETWORK_RANGE`) and **manual add** (the **Add Host** button — one or many IPs/hostnames,
+newline/space/comma separated). Manually-added hosts are saved to `reports/manual_hosts.txt`
+and merged into every discovery cycle, so they stay managed even if they're outside the scan
+range or don't answer the ping sweep. **Remove from dashboard** forgets a host (deletes its
+result + work order, drops it from auto-update/auto-reboot and from `manual_hosts.txt`).
+
+A host is managed once it's reachable by the SSH key **and** has passwordless sudo. Hosts the
+system can't fully use are surfaced on the dashboard rather than hidden:
 
 | Status            | Meaning                                                                          |
 |-------------------|----------------------------------------------------------------------------------|
@@ -179,9 +192,17 @@ rather than hidden:
 | **Check Failed**  | The update check couldn't run — e.g. an unregistered RHEL box with no enabled repos. Shown red with the reason, so it isn't mistaken for "up to date". |
 | **Reboot Needed** | Updates applied; a reboot is pending (click **Reboot**).                          |
 
-`BOOTSTRAP_PASSWORD` lets the system auto-copy the SSH key and configure passwordless sudo
-on a freshly discovered host. To skip a host entirely, add its IP to
-`ansible/exclude_hosts.txt`.
+### Auto-bootstrap (ssh-copy-id on discovery)
+
+When `BOOTSTRAP_PASSWORD` is set, a newly discovered host that the SSH key can't yet reach is
+**bootstrapped automatically**: the system uses that password (via `sshpass`) to log in as
+`cameron`, append the controller's public key to `~/.ssh/authorized_keys` (the `ssh-copy-id`
+equivalent), then install `sudo` and write a passwordless sudoers drop-in. After that it's
+managed by key auth like any other host. If `BOOTSTRAP_PASSWORD` is empty, auto-bootstrap is
+skipped and the host is flagged **Action Required** (`needs_setup`) with the manual fix
+commands instead — so leaving the password unset effectively turns the feature off.
+
+To skip a host entirely, add its IP to `ansible/exclude_hosts.txt`.
 
 ### RedHat / dnf notes
 
@@ -209,6 +230,8 @@ Basic Auth.
 | `POST /api/autoupdate/<host>`| `{ "enabled": true\|false }` → toggle auto-update      |
 | `POST /api/autoreboot/<host>`| `{ "enabled": true\|false }` → toggle auto-reboot      |
 | `POST /api/recheck/<host>`   | Re-check a single host now (re-evaluates SSH/sudo too) |
+| `POST /api/addhost`          | `{ "hosts": "ip1\nip2, host3" }` → add host(s) and queue checks |
+| `POST /api/remove/<host>`    | Forget a host (result, work order, settings, manual entry) |
 | `POST /api/scan`             | Trigger an immediate full discovery + check cycle      |
 | `GET  /api/scan/status`      | Whether a scan is queued/running                       |
 | `POST /api/whoami`           | Validate credentials (used by the login UI)            |
