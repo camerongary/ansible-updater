@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/icon.png" width="128" alt="Ansible Linux Update Manager icon">
+</p>
+
 # Ansible Linux Update Manager
 
 A containerized system for discovering Linux servers on your network, **listing the
