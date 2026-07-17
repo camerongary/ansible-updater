@@ -730,6 +730,10 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
 .audit-caret {{ color:#bbb; width:12px; display:inline-block; }}
 .audit-pkgs {{ padding:8px 30px 12px 56px; background:#fafafa; border-bottom:1px solid #f0f0f0; font-size:12px; color:#444; line-height:1.7; }}
 .audit-pkgs .pk {{ display:inline-block; background:#eef; border:1px solid #dde; border-radius:4px; padding:1px 7px; margin:2px 4px 2px 0; font-family:monospace; }}
+.audit-date {{ cursor:pointer; padding:9px 30px; background:#f3f4f8; border-bottom:1px solid #e6e8ef; font-weight:600; color:#444; font-size:13px; user-select:none; }}
+.audit-date:hover {{ background:#eceef5; }}
+.audit-date-caret {{ color:#888; display:inline-block; width:12px; }}
+.audit-date-count {{ color:#999; font-weight:400; font-size:12px; margin-left:6px; }}
 .footer {{ text-align:center; margin-top:10px; color:#fff; font-size:13px; }}
 .auth-area {{ float:right; font-size:13px; }}
 .auth-area .signed {{ color:#666; margin-right:10px; }}
@@ -1081,33 +1085,62 @@ function toggleAudit(idx) {{
   var caret = el.previousElementSibling.querySelector('.audit-caret');
   if (caret) caret.innerHTML = open ? '&#9662;' : '&#9656;';
 }}
+function toggleDate(gidx) {{
+  var el = document.getElementById('audit-group-' + gidx);
+  if (!el) return;
+  var open = el.style.display === 'none';
+  el.style.display = open ? 'block' : 'none';
+  var caret = el.previousElementSibling.querySelector('.audit-date-caret');
+  if (caret) caret.innerHTML = open ? '&#9662;' : '&#9656;';
+}}
+function auditRow(it, idx) {{
+  var hasPkgs = it.packages && it.packages.length;
+  var pk = hasPkgs ? (it.packages.length + ' pkg') : '';
+  // Show hostname and IP when we know the friendly name; fall back to IP only.
+  var nameHtml = (it.display_name && it.display_name !== it.host)
+    ? (it.display_name + ' <span class="audit-ip">' + it.host + '</span>')
+    : it.host;
+  var caret = hasPkgs ? '<span class="audit-caret">&#9656;</span>' : '<span class="audit-caret"></span>';
+  // Show time-of-day within a date group (the date is in the group header).
+  var tod = (it.ts || '').indexOf('T') >= 0 ? it.ts.split('T')[1].slice(0,8) : it.ts;
+  var row = '<div class="audit-item' + (hasPkgs ? ' expandable" onclick="toggleAudit(' + idx + ')"' : '"') + '>' +
+    caret +
+    '<span class="audit-ts">' + tod + '</span>' +
+    '<span class="status-badge status-info">' + it.action + '</span>' +
+    '<span class="audit-host">' + nameHtml + '</span>' +
+    '<span>' + pk + '</span>' + badge(it.result) +
+    '<span style="color:#999;">' + (it.detail || '') + '</span></div>';
+  if (hasPkgs) {{
+    var label = it.action === 'apply' ? (it.result === 'success' ? 'Applied' : 'Attempted') : 'Packages';
+    var chips = it.packages.map(function(p){{ return '<span class="pk">' + p + '</span>'; }}).join('');
+    row += '<div class="audit-pkgs" id="audit-pkgs-' + idx + '" style="display:none;">' +
+           '<strong>' + label + ' (' + it.packages.length + '):</strong> ' + chips + '</div>';
+  }}
+  return row;
+}}
 function loadAudit() {{
   fetch('/api/audit?limit=50').then(function(r){{ return r.json(); }}).then(function(items){{
     var c = document.getElementById('audit');
     if (!items.length) {{ c.innerHTML = '<p class="empty">No activity yet.</p>'; return; }}
-    c.innerHTML = items.map(function(it, idx){{
-      var hasPkgs = it.packages && it.packages.length;
-      var pk = hasPkgs ? (it.packages.length + ' pkg') : '';
-      // Show hostname and IP when we know the friendly name; fall back to IP only.
-      var nameHtml = (it.display_name && it.display_name !== it.host)
-        ? (it.display_name + ' <span class="audit-ip">' + it.host + '</span>')
-        : it.host;
-      var caret = hasPkgs ? '<span class="audit-caret">&#9656;</span>' : '<span class="audit-caret"></span>';
-      var row = '<div class="audit-item' + (hasPkgs ? ' expandable" onclick="toggleAudit(' + idx + ')"' : '"') + '>' +
-        caret +
-        '<span class="audit-ts">' + it.ts + '</span>' +
-        '<span class="status-badge status-info">' + it.action + '</span>' +
-        '<span class="audit-host">' + nameHtml + '</span>' +
-        '<span>' + pk + '</span>' + badge(it.result) +
-        '<span style="color:#999;">' + (it.detail || '') + '</span></div>';
-      if (hasPkgs) {{
-        var label = it.action === 'apply' ? (it.result === 'success' ? 'Applied' : 'Attempted') : 'Packages';
-        var chips = it.packages.map(function(p){{ return '<span class="pk">' + p + '</span>'; }}).join('');
-        row += '<div class="audit-pkgs" id="audit-pkgs-' + idx + '" style="display:none;">' +
-               '<strong>' + label + ' (' + it.packages.length + '):</strong> ' + chips + '</div>';
-      }}
-      return row;
-    }}).join('');
+    // API returns oldest-first; show newest first, grouped by date.
+    var rev = items.slice().reverse();
+    var groups = [];
+    rev.forEach(function(it){{
+      var d = (it.ts || '').slice(0, 10) || 'unknown';
+      if (!groups.length || groups[groups.length - 1].date !== d) groups.push({{date: d, items: []}});
+      groups[groups.length - 1].items.push(it);
+    }});
+    var html = '', idx = 0;
+    groups.forEach(function(g, gidx){{
+      var collapsed = gidx !== 0;   // newest day open, older days collapsed
+      html += '<div class="audit-date" onclick="toggleDate(' + gidx + ')">' +
+        '<span class="audit-date-caret">' + (collapsed ? '&#9656;' : '&#9662;') + '</span> ' +
+        g.date + '<span class="audit-date-count">' + g.items.length + ' event' + (g.items.length === 1 ? '' : 's') + '</span></div>';
+      html += '<div class="audit-group" id="audit-group-' + gidx + '"' + (collapsed ? ' style="display:none;"' : '') + '>';
+      g.items.forEach(function(it){{ html += auditRow(it, idx++); }});
+      html += '</div>';
+    }});
+    c.innerHTML = html;
   }});
 }}
 // Poll the audit log only while the tab is visible — a backgrounded tab left
