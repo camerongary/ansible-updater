@@ -16,6 +16,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, request, abort
+from werkzeug.security import check_password_hash, generate_password_hash
 
 import audit
 
@@ -29,11 +30,23 @@ MANUAL_HOSTS_FILE = os.path.join(REPORTS_DIR, "manual_hosts.txt")
 TRIGGER_FILE = "/tmp/trigger_scan"
 LOCK_FILE = "/tmp/scan_running"
 
-# Auth: reading the dashboard is always open; actions (approve / reject / reboot
-# / recheck / scan) require Basic Auth. If no password is configured, actions are
-# disabled entirely (the dashboard stays viewable).
+# Auth: the whole dashboard requires Basic Auth — either the admin account
+# (below) or the mandatory view-only account. Actions (approve / reject /
+# reboot / recheck / scan) additionally require the admin account. If no admin
+# password is configured, actions are disabled entirely (the dashboard stays
+# viewable to the viewer account).
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+
+# Mandatory view-only account. It cannot be disabled: the dashboard is never
+# served without a login. The account starts with a preset password
+# (VIEWER_PASSWORD, default "viewonly"); once changed from the UI, the hash in
+# VIEWER_AUTH_FILE (on the /reports volume) is what counts, so the change
+# survives container rebuilds and the env preset is ignored from then on.
+VIEWER_USER = os.environ.get("VIEWER_USER", "viewer")
+VIEWER_PRESET_PASSWORD = os.environ.get("VIEWER_PASSWORD", "viewonly")
+VIEWER_AUTH_FILE = os.path.join(REPORTS_DIR, "viewer_auth.json")
+VIEWER_MIN_PASSWORD_LEN = 6
 
 # Small inline clipboard icon for the per-IP copy button.
 COPY_ICON = ('<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -51,21 +64,69 @@ def _json_error(err):
     return jsonify({"ok": False, "description": getattr(err, "description", str(err))}), err.code
 
 
+def load_viewer_auth():
+    """Return the viewer account record, creating it with the preset password
+    on first use (or if the file is unreadable/corrupt)."""
+    try:
+        with open(VIEWER_AUTH_FILE) as f:
+            d = json.load(f)
+        if d.get("password_hash"):
+            return d
+    except Exception:
+        pass
+    d = {"password_hash": generate_password_hash(VIEWER_PRESET_PASSWORD), "preset": True}
+    save_viewer_auth(d)
+    return d
+
+
+def save_viewer_auth(d):
+    try:
+        with open(VIEWER_AUTH_FILE, "w") as f:
+            json.dump(d, f, indent=2)
+    except Exception as e:
+        print(f"Error writing {VIEWER_AUTH_FILE}: {e}")
+
+
+def _is_admin(auth):
+    return bool(DASHBOARD_PASSWORD) and bool(auth) and \
+        auth.username == DASHBOARD_USER and \
+        hmac.compare_digest(auth.password or "", DASHBOARD_PASSWORD)
+
+
+def _is_viewer(auth):
+    return bool(auth) and auth.username == VIEWER_USER and \
+        check_password_hash(load_viewer_auth()["password_hash"], auth.password or "")
+
+
+def _challenge():
+    resp = jsonify({"ok": False, "description": "Authentication required."})
+    resp.headers["WWW-Authenticate"] = 'Basic realm="Update dashboard"'
+    return resp, 401
+
+
+@app.before_request
+def require_view_auth():
+    """Every page and API needs a login — viewer or admin. /health stays open
+    for container healthchecks."""
+    if request.path == "/health":
+        return None
+    auth = request.authorization
+    if _is_admin(auth) or _is_viewer(auth):
+        return None
+    return _challenge()
+
+
 def require_auth():
-    """Gate a mutating action. Returns an error response if not allowed, else None."""
+    """Gate a mutating action (admin only). Returns an error response if not
+    allowed, else None."""
     if not DASHBOARD_PASSWORD:
         return jsonify({
             "ok": False,
             "description": "Actions are disabled: no dashboard password is set. "
                            "Set DASHBOARD_PASSWORD in .env to enable approvals and reboots.",
         }), 403
-    auth = request.authorization
-    ok = bool(auth) and auth.username == DASHBOARD_USER and \
-        hmac.compare_digest(auth.password or "", DASHBOARD_PASSWORD)
-    if not ok:
-        resp = jsonify({"ok": False, "description": "Authentication required."})
-        resp.headers["WWW-Authenticate"] = 'Basic realm="Update dashboard"'
-        return resp, 401
+    if not _is_admin(request.authorization):
+        return _challenge()
     return None
 
 
@@ -346,10 +407,18 @@ def index():
         else "AUTO-APPLY mode — updates are applied automatically each cycle."
     )
 
+    preset_warning = ""
+    if load_viewer_auth().get("preset"):
+        preset_warning = (
+            '<div class="preset-warning">The view-only account is still using the preset '
+            'password &mdash; <a href="#" onclick="showPw(); return false;">change it now</a>.</div>'
+        )
+
     return PAGE.format(
         rows=rows,
         stats=stats,
         mode_banner=mode_banner,
+        preset_warning=preset_warning,
         update_interval=update_interval,
         now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         auth_enabled="true" if DASHBOARD_PASSWORD else "false",
@@ -633,11 +702,30 @@ def scan_status():
 
 @app.route("/api/whoami", methods=["POST"])
 def api_whoami():
-    """Validate credentials and return the username (used by the login UI)."""
-    denied = require_auth()
-    if denied:
-        return denied
-    return jsonify({"ok": True, "user": DASHBOARD_USER})
+    """Return who the presented credentials belong to (used by the login UI).
+    The before_request gate already rejected anything unauthenticated."""
+    if _is_admin(request.authorization):
+        return jsonify({"ok": True, "user": DASHBOARD_USER, "role": "admin"})
+    return jsonify({"ok": True, "user": VIEWER_USER, "role": "viewer"})
+
+
+@app.route("/api/viewer/password", methods=["POST"])
+def api_viewer_password():
+    """Change the view-only account's password. The viewer must prove the
+    current password; the admin may set it without one (password reset)."""
+    data = request.get_json(silent=True) or {}
+    current = data.get("current") or ""
+    new = data.get("new") or ""
+    if not _is_admin(request.authorization):
+        if not check_password_hash(load_viewer_auth()["password_hash"], current):
+            return jsonify({"ok": False, "description": "Current password is incorrect."}), 403
+    if len(new) < VIEWER_MIN_PASSWORD_LEN:
+        return jsonify({"ok": False,
+                        "description": f"New password must be at least {VIEWER_MIN_PASSWORD_LEN} characters."}), 400
+    save_viewer_auth({"password_hash": generate_password_hash(new), "preset": False})
+    audit.append("viewer_password", "-", source="dashboard", result="success",
+                 detail="view-only account password changed")
+    return jsonify({"ok": True})
 
 
 @app.route("/health")
@@ -661,6 +749,9 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-seri
 .container {{ max-width:1200px; margin:0 auto; }}
 .banner {{ background:rgba(255,255,255,0.15); color:#fff; padding:12px; border-radius:8px;
           margin-bottom:20px; text-align:center; font-size:13px; }}
+.preset-warning {{ background:#fff3cd; color:#7a5c00; border:1px solid #ffe08a; padding:10px 12px;
+                  border-radius:8px; margin-bottom:20px; text-align:center; font-size:13px; }}
+.preset-warning a {{ color:#7a5c00; font-weight:600; }}
 header {{ background:#fff; padding:30px; border-radius:12px; box-shadow:0 4px 6px rgba(0,0,0,.1); margin-bottom:30px; }}
 header h1 {{ color:#333; margin-bottom:8px; }}
 header p {{ color:#666; font-size:14px; }}
@@ -759,6 +850,7 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
 <body>
 <div class="container">
   <div class="banner">{mode_banner} &nbsp;|&nbsp; Check cycle: {update_interval}s</div>
+  {preset_warning}
   <header>
     <div id="authArea" class="auth-area"></div>
     <h1>System Update Approvals</h1>
@@ -819,6 +911,23 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
     <div class="login-actions">
       <button class="btn btn-approve" onclick="addHostSubmit()">Add</button>
       <button class="btn" style="background:#9aa0a6;" onclick="hideAddHost()">Cancel</button>
+    </div>
+  </div>
+</div>
+<div id="pwOverlay" class="login-overlay">
+  <div class="login-box">
+    <h3 style="margin-bottom:6px;color:#333;">Change viewer password</h3>
+    <p style="color:#666;font-size:13px;margin-bottom:6px;">Sets a new password for the view-only <strong>viewer</strong> account. You&rsquo;ll be asked to log in again with the new password.</p>
+    <label class="login-label">Current password</label>
+    <input id="pwCurrent" class="login-input" type="password" autocomplete="current-password" onkeydown="pwKey(event)">
+    <label class="login-label">New password</label>
+    <input id="pwNew" class="login-input" type="password" autocomplete="new-password" onkeydown="pwKey(event)">
+    <label class="login-label">Confirm new password</label>
+    <input id="pwConfirm" class="login-input" type="password" autocomplete="new-password" onkeydown="pwKey(event)">
+    <div id="pwErr" class="login-err"></div>
+    <div class="login-actions">
+      <button class="btn btn-approve" onclick="pwSubmit()">Change password</button>
+      <button class="btn" style="background:#9aa0a6;" onclick="hidePw()">Cancel</button>
     </div>
   </div>
 </div>
@@ -978,14 +1087,44 @@ function loginSubmit() {{
 function renderAuth() {{
   var el = document.getElementById('authArea');
   if (!el) return;
-  if (!AUTH_ENABLED) {{ el.innerHTML = ''; return; }}
+  var pwBtn = '<button onclick="showPw()" style="margin-right:8px;">Change viewer password</button>';
+  if (!AUTH_ENABLED) {{ el.innerHTML = pwBtn; return; }}
   if (sessionStorage.getItem('auth')) {{
     var u = sessionStorage.getItem('authUser') || 'admin';
     el.innerHTML = '<span class="signed">Signed in as <strong>' + u + '</strong></span>' +
-                   '<button onclick="logout()">Log out</button>';
+                   pwBtn + '<button onclick="logout()">Log out</button>';
   }} else {{
-    el.innerHTML = '<button onclick="showLogin()">Log in</button>';
+    el.innerHTML = pwBtn + '<button onclick="showLogin()">Log in</button>';
   }}
+}}
+function showPw() {{
+  ['pwCurrent', 'pwNew', 'pwConfirm'].forEach(function(id) {{ document.getElementById(id).value = ''; }});
+  document.getElementById('pwErr').textContent = '';
+  document.getElementById('pwOverlay').style.display = 'flex';
+  document.getElementById('pwCurrent').focus();
+}}
+function hidePw() {{ document.getElementById('pwOverlay').style.display = 'none'; }}
+function pwKey(ev) {{ if (ev.key === 'Enter') pwSubmit(); }}
+function pwSubmit() {{
+  var cur = document.getElementById('pwCurrent').value;
+  var nw = document.getElementById('pwNew').value;
+  var cf = document.getElementById('pwConfirm').value;
+  var errEl = document.getElementById('pwErr');
+  if (nw !== cf) {{ errEl.textContent = 'New passwords do not match.'; return; }}
+  errEl.textContent = 'Saving\\u2026';
+  var headers = Object.assign({{'Content-Type':'application/json'}}, authHeader());
+  fetch('/api/viewer/password', {{method:'POST', headers: headers, body: JSON.stringify({{current: cur, 'new': nw}})}})
+    .then(function(r) {{ return r.json().then(function(b) {{ return {{ok: r.ok, body: b}}; }}); }})
+    .then(function(res) {{
+      if (res.ok) {{
+        hidePw();
+        alert('Viewer password changed. Log in with the new password when prompted.');
+        location.reload();
+      }} else {{
+        errEl.textContent = (res.body && res.body.description) || 'Change failed.';
+      }}
+    }})
+    .catch(function() {{ errEl.textContent = 'Change failed.'; }});
 }}
 function logout() {{
   sessionStorage.removeItem('auth'); sessionStorage.removeItem('authUser'); renderAuth();

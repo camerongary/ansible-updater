@@ -54,7 +54,9 @@ log and shown in the dashboard's "Recent Activity" panel.
   host shows **Action Required** with the exact fix commands
 - **Per-host rescan** — re-check a single host on demand (e.g. right after fixing it)
 - **Release-upgrade detection** — flags Ubuntu hosts with a new OS release / EOL (the upgrade itself stays manual)
-- **Dashboard authentication** — viewing is open; actions require login (Basic Auth)
+- **Dashboard authentication** — every page requires a login (Basic Auth): a mandatory
+  view-only `viewer` account (preset password `viewonly`, changeable from the UI) for
+  read access, and the admin account for actions
 - **Audit log** — append-only JSONL trail of every action, surfaced in the UI
 - **Slack integration** — cycle summaries plus per-host apply/reboot notifications
 - **Dashboard niceties** — sortable columns, copy-to-clipboard IPs and command snippets,
@@ -111,6 +113,8 @@ REQUIRE_APPROVAL=true                 # check-only until you approve; false = le
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
 DASHBOARD_USER=admin                  # login for dashboard actions
 DASHBOARD_PASSWORD=<choose-a-strong-password>
+VIEWER_USER=viewer                    # mandatory view-only login (all pages)
+VIEWER_PASSWORD=viewonly              # initial preset only — change it from the UI
 DASHBOARD_URL=http://192.168.12.30:8080   # used in Slack "View Full Report" links
 TZ=America/Los_Angeles
 BOOTSTRAP_PASSWORD=                   # optional: auto-onboard new hosts (see below)
