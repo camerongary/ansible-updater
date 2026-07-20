@@ -81,7 +81,7 @@ privileged SSH/Ansible work, so the web layer stays unprivileged.
 │  │  │   ├─ nmap discovery + bootstrap         │ │
 │  │  │   ├─ CHECK playbook (gather updates)    │ │
 │  │  │   └─ poller → APPLY / REBOOT / RECHECK  │ │
-│  │  └─ web_server.py   dashboard :8080        │ │
+│  │  └─ web_server.py   dashboard :8443 (TLS)  │ │
 │  │         (approve / reject / reboot, audit) │ │
 │  └──────────────────────────────────────────┘ │
 │                  │  shared /reports volume      │
@@ -115,7 +115,7 @@ DASHBOARD_USER=admin                  # login for dashboard actions
 DASHBOARD_PASSWORD=<choose-a-strong-password>
 VIEWER_USER=viewer                    # mandatory view-only login (all pages)
 VIEWER_PASSWORD=viewonly              # initial preset only — change it from the UI
-DASHBOARD_URL=http://192.168.12.30:8080   # used in Slack "View Full Report" links
+DASHBOARD_URL=https://192.168.12.30:8443  # used in Slack "View Full Report" links
 TZ=America/Los_Angeles
 BOOTSTRAP_PASSWORD=                   # optional: auto-onboard new hosts (see below)
 ```
@@ -136,7 +136,9 @@ docker compose up -d
 
 ### 4. Open the dashboard
 
-Browse to **`http://<docker-host>:8080`** (e.g. `http://192.168.12.30:8080`).
+Browse to **`https://<docker-host>:8443`** (e.g. `https://192.168.12.30:8443`).
+The cert is self-signed, so accept the one-time browser warning (or import
+`certs/cert.pem` and mark it trusted). `http://<docker-host>:8080` redirects here.
 Click a host row to expand its package list, then **Approve selected** / **Reject** /
 **Reboot**. The first action prompts you to log in (see Authentication).
 
@@ -148,18 +150,23 @@ docker compose logs -f ansible-updater
 
 ## Authentication
 
-Viewing the dashboard is always open; **actions** (approve, reject, reboot, recheck, scan)
-require Basic Auth.
+**Every page and API requires a login** (Basic Auth), with two accounts:
 
-- Credentials come from `DASHBOARD_USER` / `DASHBOARD_PASSWORD` in `.env`.
+| Account | From | Can do |
+|---------|------|--------|
+| **Viewer** (`VIEWER_USER` / `VIEWER_PASSWORD`) | `.env` preset, changeable from the UI | Read-only: view hosts, packages, audit log |
+| **Admin** (`DASHBOARD_USER` / `DASHBOARD_PASSWORD`) | `.env` | Everything above **plus** actions (approve, reject, reboot, recheck, scan, add/remove host) |
+
+- `GET /health` is the only unauthenticated endpoint, so container healthchecks keep working.
 - The UI shows **"Signed in as &lt;user&gt;"** with a **Log out** button; a login modal
   prompts for the password (masked, with a Show/Hide toggle). Credentials are held per
   browser session.
-- If `DASHBOARD_PASSWORD` is **empty**, the dashboard is still viewable but every action is
-  disabled with a clear message — so you can't accidentally run it wide open.
+- If `DASHBOARD_PASSWORD` is **empty**, actions are disabled with a clear message (the
+  viewer login still works) — so you can't accidentally run it wide open.
 
-> Note: Basic Auth over plain HTTP sends credentials base64-encoded (not encrypted). It's
-> intended for a trusted LAN. For exposure beyond the LAN, put it behind HTTPS.
+> Note: the dashboard serves HTTPS by default (self-signed), so Basic Auth credentials are
+> encrypted in transit. The cert is self-signed and the app runs Flask's development
+> server, so this is intended for a trusted LAN — not direct exposure to the internet.
 
 ## Configuration
 
@@ -171,9 +178,14 @@ require Basic Auth.
 | `SLACK_WEBHOOK_URL`  | _(empty)_                        | Incoming webhook; leave empty to disable Slack                   |
 | `DASHBOARD_USER`     | `admin`                          | Username for dashboard actions                                   |
 | `DASHBOARD_PASSWORD` | _(empty)_                        | Password for actions; empty = actions disabled (view-only)       |
-| `DASHBOARD_URL`      | `http://192.168.12.30:8080`      | Base URL used in Slack "View Full Report" links                  |
+| `DASHBOARD_URL`      | `https://192.168.12.30:8443`     | Base URL used in Slack "View Full Report" links                  |
 | `TZ`                 | `America/Los_Angeles`            | Container timezone (for dashboard/Slack timestamps)              |
 | `BOOTSTRAP_PASSWORD` | _(empty)_                        | Password used to auto-onboard new hosts (copy key + set sudo)    |
+| `ENABLE_HTTPS`       | `true`                           | Serve TLS on `HTTPS_PORT`; `false` = plain HTTP only             |
+| `HTTPS_PORT`         | `8443`                           | TLS port                                                         |
+| `HTTP_PORT`          | `8080`                           | Plain-HTTP port; 308-redirects to HTTPS when TLS is on           |
+| `TLS_CERT` / `TLS_KEY` | `/certs/cert.pem` `/certs/key.pem` | Cert/key paths (drop in your own to replace the self-signed one) |
+| `TLS_SAN`            | _(derived)_                      | Override cert SAN, e.g. `IP:10.0.0.5,DNS:updates.lan`            |
 
 ### Slack webhook
 
@@ -223,8 +235,10 @@ To skip a host entirely, add its IP to `ansible/exclude_hosts.txt`.
 
 ## API endpoints
 
-The dashboard is served on port `8080`. `GET` endpoints are open; `POST` actions require
-Basic Auth.
+The dashboard is served over HTTPS on port `8443` (plain HTTP on `8080` issues a 308
+redirect there). **Every** endpoint requires Basic Auth — viewer or admin — except
+`GET /health`, which stays open for container healthchecks. `POST` actions additionally
+require the admin account.
 
 | Method & path                | Description                                             |
 |------------------------------|---------------------------------------------------------|
@@ -246,19 +260,19 @@ Basic Auth.
 | `GET  /health`               | Health check                                           |
 
 ```bash
-curl http://192.168.12.30:8080/api/stats
+curl -k -u viewer:<password> https://192.168.12.30:8443/api/stats
 # { "total_hosts": 5, "total_updates": 23, "total_security": 8,
 #   "hosts_needing_reboot": 2, "last_updated": "..." }
 
 # An action requires credentials:
-curl -u admin:<password> -X POST http://192.168.12.30:8080/api/recheck/192.168.12.10
+curl -k -u admin:<password> -X POST https://192.168.12.30:8443/api/recheck/192.168.12.10
 ```
 
 ## Directory structure
 
 ```
 ├── Dockerfile                       # Container image (ansible-core, nmap, sshpass, flask)
-├── docker-compose.yml               # Compose service (publishes :8080)
+├── docker-compose.yml               # Compose service (publishes :8443 + :8080)
 ├── .env.example                     # Environment template
 ├── DEPLOY.md                        # Update / rollback / host-onboarding notes
 ├── ansible/
