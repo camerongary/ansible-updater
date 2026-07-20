@@ -35,10 +35,42 @@ echo "[$(date)] Starting Ansible Update Manager" | tee -a "$LOG_FILE"
 echo "[$(date)] NETWORK_RANGE=$NETWORK_RANGE UPDATE_INTERVAL=${UPDATE_INTERVAL}s REQUIRE_APPROVAL=$REQUIRE_APPROVAL" | tee -a "$LOG_FILE"
 echo "[$(date)] Slack webhook configured: $([ -n "$SLACK_WEBHOOK_URL" ] && echo 'YES' || echo 'NO')" | tee -a "$LOG_FILE"
 
+# --------------------------------------------------------------------------- #
+# TLS: generate a self-signed certificate for the dashboard on first boot.
+# Persisted in the /certs bind mount, so it survives rebuilds (and you can drop
+# in your own cert/key at these paths instead).
+# --------------------------------------------------------------------------- #
+TLS_CERT="${TLS_CERT:-/certs/cert.pem}"
+TLS_KEY="${TLS_KEY:-/certs/key.pem}"
+if [ "${ENABLE_HTTPS:-true}" = "true" ] && [ ! -f "$TLS_CERT" ]; then
+    mkdir -p "$(dirname "$TLS_CERT")"
+    san="${TLS_SAN:-}"
+    if [ -z "$san" ]; then
+        # Derive the SAN from DASHBOARD_URL's host so the cert matches how the
+        # dashboard is actually reached, plus loopback for local checks.
+        h=$(printf '%s' "${DASHBOARD_URL:-}" | sed -E 's#^https?://##; s#[:/].*##')
+        san="IP:127.0.0.1,DNS:localhost"
+        if printf '%s' "$h" | grep -qE '^[0-9]+(\.[0-9]+){3}$'; then
+            san="IP:${h},${san}"
+        elif [ -n "$h" ]; then
+            san="DNS:${h},${san}"
+        fi
+    fi
+    echo "[$(date)] Generating self-signed TLS certificate (SAN: $san)" | tee -a "$LOG_FILE"
+    if openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -keyout "$TLS_KEY" -out "$TLS_CERT" \
+            -subj "/CN=ansible-updater" -addext "subjectAltName=${san}" >/dev/null 2>&1; then
+        chmod 600 "$TLS_KEY"
+        echo "[$(date)] TLS certificate created at $TLS_CERT" | tee -a "$LOG_FILE"
+    else
+        echo "[$(date)] WARNING: TLS cert generation failed — dashboard falls back to HTTP" | tee -a "$LOG_FILE"
+    fi
+fi
+
 # Start web dashboard in the background
 python3 /scripts/web_server.py &
 WEB_PID=$!
-echo "[$(date)] Web dashboard started on port 8080 (pid $WEB_PID)" | tee -a "$LOG_FILE"
+echo "[$(date)] Web dashboard started (pid $WEB_PID)" | tee -a "$LOG_FILE"
 
 # Log to stderr so stdout can carry data returned by functions
 log() {

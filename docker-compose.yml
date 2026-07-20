@@ -10,16 +10,22 @@ services:
       - NETWORK_RANGE=${NETWORK_RANGE:-192.168.12.0/24}
       - UPDATE_INTERVAL=${UPDATE_INTERVAL:-3600}
       - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-true}
-      - DASHBOARD_URL=${DASHBOARD_URL:-http://192.168.12.30:8080}
+      - DASHBOARD_URL=${DASHBOARD_URL:-https://192.168.12.30:8443}
       - DASHBOARD_USER=${DASHBOARD_USER:-admin}
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
       - TZ=${TZ:-America/Los_Angeles}
       - BOOTSTRAP_PASSWORD=${BOOTSTRAP_PASSWORD:-}
+      - ENABLE_HTTPS=${ENABLE_HTTPS:-true}
+      - HTTP_PORT=${HTTP_PORT:-8080}
+      - HTTPS_PORT=${HTTPS_PORT:-8443}
+      - TLS_SAN=${TLS_SAN:-}
     ports:
       - "8080:8080"
+      - "8443:8443"
     volumes:
       - ./ansible:/ansible
       - ./reports:/reports
+      - ./certs:/certs
       - ~/.ssh:/root/.ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
