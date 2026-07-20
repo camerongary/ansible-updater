@@ -23,30 +23,30 @@
       apt:
         update_cache: yes
         cache_valid_time: 600
-      when: ansible_os_family == "Debian"
+      when: ansible_pkg_mgr == "apt"
 
     - name: Debian - list upgradable packages
       shell: apt list --upgradable 2>/dev/null | tail -n +2
       register: debian_upgradable
       changed_when: false
-      when: ansible_os_family == "Debian"
+      when: ansible_pkg_mgr == "apt"
 
     - name: Debian - record upgradable lines
       set_fact:
         upgradable_lines: "{{ debian_upgradable.stdout_lines }}"
-      when: ansible_os_family == "Debian"
+      when: ansible_pkg_mgr == "apt"
 
     - name: Debian - check if reboot required
       stat:
         path: /var/run/reboot-required
       register: debian_reboot_required
-      when: ansible_os_family == "Debian"
+      when: ansible_pkg_mgr == "apt"
 
     - name: Debian - set reboot flag
       set_fact:
         pkg_reboot_required: true
       when:
-        - ansible_os_family == "Debian"
+        - ansible_pkg_mgr == "apt"
         - debian_reboot_required.stat.exists
 
     - name: Debian - check for an OS release upgrade (Ubuntu)
@@ -66,12 +66,12 @@
       register: debian_relupg
       changed_when: false
       failed_when: false
-      when: ansible_os_family == "Debian"
+      when: ansible_pkg_mgr == "apt"
 
     - name: Debian - record release upgrade
       set_fact:
         release_upgrade: "{{ debian_relupg.stdout | default('') | trim }}"
-      when: ansible_os_family == "Debian"
+      when: ansible_pkg_mgr == "apt"
 
     # ---------- DNF (Fedora / RHEL 8+ / Rocky / Alma) ----------
     - name: dnf - check for enabled repositories

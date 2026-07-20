@@ -26,7 +26,7 @@
       apt:
         name: "{{ approved_packages }}"
         state: latest
-      when: ansible_os_family == "Debian"
+      when: ansible_pkg_mgr == "apt"
       register: debian_apply
 
     - name: RPM - import distro GPG keys so signed packages validate

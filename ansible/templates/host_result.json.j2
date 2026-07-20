@@ -10,7 +10,7 @@
 {%- set ns = namespace(pkgs=[]) -%}
 {%- for raw in upgradable_lines -%}
   {%- set line = raw | trim -%}
-  {%- if line and (ansible_os_family == "Debian") and ('/' in line) and ('upgradable from:' in line) -%}
+  {%- if line and (ansible_pkg_mgr == "apt") and ('/' in line) and ('upgradable from:' in line) -%}
     {#- e.g. openssl/jammy-security 1.1.1f-2.19 amd64 [upgradable from: 1.1.1f-2.18] -#}
     {%- set parts = line.split() -%}
     {%- set name = parts[0].split('/')[0] -%}
@@ -19,7 +19,7 @@
     {%- set current_version = (line.split('upgradable from:')[1] | trim | replace(']', '') | trim) -%}
     {%- set is_security = ('security' in repo) or (name in security_names) -%}
     {%- set _ = ns.pkgs.append({'name': name, 'current_version': current_version, 'new_version': new_version, 'security': is_security}) -%}
-  {%- elif line and (ansible_os_family != "Debian") and (line.split() | length >= 2) -%}
+  {%- elif line and (ansible_pkg_mgr != "apt") and (line.split() | length >= 2) -%}
     {#- "name.arch version" from dnf check-mode or yum check-update (RedHat / XCP-ng) -#}
     {%- set parts = line.split() -%}
     {%- set name = parts[0] -%}
