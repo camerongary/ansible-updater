@@ -19,3 +19,5 @@ __pycache__/
 .DS_Store
 certs/
 .env.bak.*
+core.*
+core
