@@ -1270,22 +1270,25 @@ function loadAudit() {{
   fetch('/api/audit?limit=50').then(function(r){{ return r.json(); }}).then(function(items){{
     var c = document.getElementById('audit');
     if (!items.length) {{ c.innerHTML = '<p class="empty">No activity yet.</p>'; return; }}
-    // API returns oldest-first; show newest first, grouped by date.
-    var rev = items.slice().reverse();
-    var groups = [];
-    rev.forEach(function(it){{
+    // Group by date. Sort explicitly (newest date first, and newest entry first
+    // within a date) so ordering never depends on how the API returns records.
+    var byDate = {{}};
+    items.forEach(function(it){{
       var d = (it.ts || '').slice(0, 10) || 'unknown';
-      if (!groups.length || groups[groups.length - 1].date !== d) groups.push({{date: d, items: []}});
-      groups[groups.length - 1].items.push(it);
+      (byDate[d] = byDate[d] || []).push(it);
     }});
+    var dates = Object.keys(byDate).sort().reverse();   // dates descending
     var html = '', idx = 0;
-    groups.forEach(function(g, gidx){{
+    dates.forEach(function(d, gidx){{
+      var list = byDate[d].slice().sort(function(a, b){{
+        return (a.ts < b.ts) ? 1 : (a.ts > b.ts) ? -1 : 0;   // newest first
+      }});
       var collapsed = gidx !== 0;   // newest day open, older days collapsed
       html += '<div class="audit-date" onclick="toggleDate(' + gidx + ')">' +
         '<span class="audit-date-caret">' + (collapsed ? '&#9656;' : '&#9662;') + '</span> ' +
-        g.date + '<span class="audit-date-count">' + g.items.length + ' event' + (g.items.length === 1 ? '' : 's') + '</span></div>';
+        d + '<span class="audit-date-count">' + list.length + ' event' + (list.length === 1 ? '' : 's') + '</span></div>';
       html += '<div class="audit-group" id="audit-group-' + gidx + '"' + (collapsed ? ' style="display:none;"' : '') + '>';
-      g.items.forEach(function(it){{ html += auditRow(it, idx++); }});
+      list.forEach(function(it){{ html += auditRow(it, idx++); }});
       html += '</div>';
     }});
     c.innerHTML = html;
