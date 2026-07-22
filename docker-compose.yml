@@ -10,7 +10,7 @@ services:
       - NETWORK_RANGE=${NETWORK_RANGE:-192.168.12.0/24}
       - UPDATE_INTERVAL=${UPDATE_INTERVAL:-3600}
       - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-true}
-      - DASHBOARD_URL=${DASHBOARD_URL:-https://192.168.12.30:8443}
+      - DASHBOARD_URL=${DASHBOARD_URL:-https://docker.camerongary.com:8443}
       - DASHBOARD_USER=${DASHBOARD_USER:-admin}
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
       - TZ=${TZ:-America/Los_Angeles}

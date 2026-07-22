@@ -10,7 +10,21 @@ import requests
 
 REPORTS_DIR = "/reports"
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
-DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://192.168.12.30:8080")
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "https://docker.camerongary.com:8443")
+
+
+def resolve_host_name(host):
+    """Map an inventory name / IP to the host's friendly hostname, so Slack
+    messages read 'Zorin2' rather than '192.168.12.211'. Falls back to whatever
+    was passed in if the host has no result file yet."""
+    if not host:
+        return host
+    try:
+        with open(os.path.join(REPORTS_DIR, f"{host}_update_result.json")) as f:
+            return json.load(f).get("display_name") or host
+    except Exception:
+        return host
+
 
 def load_latest_results():
     """Load the most recent update results"""
@@ -196,7 +210,8 @@ def main():
 
     if args.action:
         packages = [p for p in args.packages.split(",") if p]
-        message = build_action_message(args.action, args.host, packages, args.result)
+        message = build_action_message(args.action, resolve_host_name(args.host),
+                                       packages, args.result)
     else:
         message = build_slack_message(load_latest_results())
     send_to_slack(message)
