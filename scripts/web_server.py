@@ -348,7 +348,7 @@ def index():
                     "#   su -    (then: apt-get install -y sudo || dnf install -y sudo ; exit)")
             detail = f"""
             <tr class="detail-row" id="detail-{hostname}" style="display:none;">
-                <td colspan="7">
+                <td colspan="9">
                     <p style="margin-bottom:8px;color:#c62828;"><strong>Action required:</strong> {reason}.</p>
                     <p style="margin-bottom:10px;color:#666;font-size:13px;">Run on this host's console (or <code>su -</code> from an SSH session). It will be onboarded automatically on the next scan:</p>
                     <button class="copy-cmds-btn" onclick="copyCmds(this,'cmds-{hostname}')">{COPY_ICON} Copy commands</button>
@@ -362,7 +362,7 @@ def index():
             reason = host.get("setup_reason") or "dnf could not query updates"
             detail = f"""
             <tr class="detail-row" id="detail-{hostname}" style="display:none;">
-                <td colspan="7">
+                <td colspan="9">
                     <p style="margin-bottom:8px;color:#c62828;"><strong>Update check failed</strong> — this host is not confirmed up to date.</p>
                     <p style="margin-bottom:10px;color:#666;font-size:13px;">Reason: <code>{reason}</code></p>
                     <p style="margin-bottom:12px;color:#666;font-size:13px;">A common cause is no enabled repositories (e.g. a RHEL host that isn't registered). Fix it on the host, then rescan.</p>
@@ -428,7 +428,7 @@ def index():
             )
             detail = f"""
             <tr class="detail-row" id="detail-{hostname}" style="display:none;">
-                <td colspan="7">
+                <td colspan="9">
                     {relup_note}
                     <div class="pkg-toolbar">
                         <button class="link" onclick="selectAll('{hostname}', true)">Select all</button>
@@ -440,12 +440,15 @@ def index():
                 </td>
             </tr>"""
 
+        lc_epoch = int(lc) if lc else 0
+        lc_cell = human_age(age) if lc else "&mdash;"
         rows += f"""
             <tr class="host-row{' stale' if is_stale else ''}" onclick="toggle('{hostname}')" data-host="{hostname}"
                 data-name="{display}" data-os="{host.get('os_name','Unknown')}" data-ip="{ip}"
                 data-updates="{host.get('updates_available',0)}" data-security="{host.get('security_updates',0)}"
                 data-reboot="{1 if reboot else 0}" data-status="{label}" data-stale="{1 if is_stale else 0}"
-                title="{checked_title}">
+                data-lastchecked="{lc_epoch}" title="{checked_title}">
+                <td class="check-cell" onclick="event.stopPropagation()"><input type="checkbox" class="host-check" value="{hostname}" onclick="onCheck(event)"></td>
                 <td><strong>{display}</strong></td>
                 <td>{host.get('os_name','Unknown')}</td>
                 <td><span class="ip-cell">{ip}</span>{copy_btn}</td>
@@ -453,10 +456,11 @@ def index():
                 <td><span class="number-badge">{host.get('security_updates',0)}</span></td>
                 <td><span class="status-badge {'status-danger' if reboot else 'status-success'}">{'Yes' if reboot else 'No'}</span></td>
                 <td><span class="status-badge {cls}">{label}</span> {stale_badge}{relup_badge}{auto_badge}</td>
+                <td class="lastcheck-cell">{lc_cell}</td>
             </tr>{detail}"""
 
     if not results:
-        rows = '<tr><td colspan="7" class="empty">No hosts have been scanned yet</td></tr>'
+        rows = '<tr><td colspan="9" class="empty">No hosts have been scanned yet</td></tr>'
 
     mode_banner = (
         "Approval required — nothing is installed until you approve."
@@ -599,18 +603,12 @@ def api_reboot(host):
     return jsonify({"ok": True})
 
 
-@app.route("/api/remove/<host>", methods=["POST"])
-def api_remove(host):
-    """Forget a host (e.g. a decommissioned VM): drop its result + work order +
-    auto-update settings so it stops showing on the dashboard."""
-    denied = require_auth()
-    if denied:
-        return denied
-    if not SAFE_HOST_RE.match(host or ""):
-        abort(400, description="Invalid host")
+def _forget_host(host):
+    """Delete a host's result, work order, apply history, and drop it from
+    auto-update / manual-host settings. Returns True if anything was removed.
+    Caller is responsible for auth and host-name validation."""
     removed = False
     paths = [result_path(host), workorder_path(host)]
-    # also drop apply-history records for this host so it's fully forgotten
     paths += glob.glob(os.path.join(REPORTS_DIR, f"{host}_apply_*.json"))
     for p in paths:
         try:
@@ -624,12 +622,44 @@ def api_remove(host):
         upd.discard(host)
         rbt.discard(host)
         save_settings(upd, rbt)
-    # drop from manually-added hosts too, or it would return on the next cycle
     manual = load_manual_hosts()
     if host in manual:
         save_manual_hosts([h for h in manual if h != host])
     audit.append("remove", host, source="dashboard", result="success", detail="removed from dashboard")
-    return jsonify({"ok": True, "removed": removed})
+    return removed
+
+
+@app.route("/api/remove/<host>", methods=["POST"])
+def api_remove(host):
+    """Forget one host (drop its result + work order + settings)."""
+    denied = require_auth()
+    if denied:
+        return denied
+    if not SAFE_HOST_RE.match(host or ""):
+        abort(400, description="Invalid host")
+    return jsonify({"ok": True, "removed": _forget_host(host)})
+
+
+@app.route("/api/remove", methods=["POST"])
+def api_remove_bulk():
+    """Forget several hosts at once (bulk cleanup of stale/decommissioned hosts)."""
+    denied = require_auth()
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    raw = body.get("hosts", [])
+    tokens = raw if isinstance(raw, list) else re.split(r"[\s,]+", str(raw))
+    seen, hosts = set(), []
+    for t in tokens:
+        t = (t or "").strip()
+        if t and SAFE_HOST_RE.match(t) and t not in seen:
+            seen.add(t)
+            hosts.append(t)
+    if not hosts:
+        abort(400, description="No valid hosts")
+    removed = [h for h in hosts if _forget_host(h)]
+    return jsonify({"ok": True, "removed": removed, "count": len(removed),
+                    "requested": len(hosts)})
 
 
 @app.route("/api/addhost", methods=["POST"])
@@ -822,8 +852,13 @@ header p {{ color:#666; font-size:14px; }}
 .stat-card h3 {{ color:#666; font-size:13px; text-transform:uppercase; letter-spacing:.5px; margin-bottom:10px; }}
 .stat-card .value {{ font-size:34px; font-weight:bold; color:#667eea; }}
 .panel {{ background:#fff; border-radius:12px; box-shadow:0 4px 6px rgba(0,0,0,.1); overflow:hidden; margin-bottom:30px; }}
-.panel-header {{ background:#f8f9fa; padding:18px 30px; border-bottom:1px solid #e9ecef; }}
+.panel-header {{ background:#f8f9fa; padding:18px 30px; border-bottom:1px solid #e9ecef; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; }}
 .panel-header h2 {{ color:#333; font-size:17px; }}
+.bulk-bar {{ display:flex; gap:8px; align-items:center; }}
+.bulk-bar .btn {{ padding:6px 12px; font-size:13px; }}
+.check-cell {{ width:36px; text-align:center; padding-left:14px !important; }}
+.check-cell input {{ cursor:pointer; width:15px; height:15px; }}
+.lastcheck-cell {{ color:#888; font-size:12px; white-space:nowrap; }}
 table {{ width:100%; border-collapse:collapse; }}
 thead {{ background:#f8f9fa; }}
 th {{ padding:14px 30px; text-align:left; font-weight:600; color:#666; font-size:12px;
@@ -927,9 +962,17 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
     <div class="stat-card"><h3>Reboot Required</h3><div class="value">{stats[hosts_needing_reboot]}</div></div>
   </div>
   <div class="panel">
-    <div class="panel-header"><h2>Hosts &mdash; click a row to review packages</h2></div>
+    <div class="panel-header">
+      <h2>Hosts &mdash; click a row to review packages</h2>
+      <div class="bulk-bar">
+        <button class="btn btn-rescan" onclick="selectStale()">Select stale</button>
+        <button class="btn" style="background:#9aa0a6;" onclick="clearSel()">Clear</button>
+        <button id="bulkRemoveBtn" class="btn btn-remove" onclick="removeSelected()" disabled>Remove selected</button>
+      </div>
+    </div>
     <table>
       <thead><tr>
+        <th class="check-cell"><input type="checkbox" id="checkAll" onclick="toggleAll(this)" title="Select all"></th>
         <th class="sortable" onclick="sortBy('name','text')">Hostname<span class="sort-ind" data-k="name"></span></th>
         <th class="sortable" onclick="sortBy('os','text')">OS<span class="sort-ind" data-k="os"></span></th>
         <th class="sortable" onclick="sortBy('ip','ip')">IP<span class="sort-ind" data-k="ip"></span></th>
@@ -937,6 +980,7 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
         <th class="sortable" onclick="sortBy('security','num')">Security<span class="sort-ind" data-k="security"></span></th>
         <th class="sortable" onclick="sortBy('reboot','num')">Reboot<span class="sort-ind" data-k="reboot"></span></th>
         <th class="sortable" onclick="sortBy('status','text')">Status<span class="sort-ind" data-k="status"></span></th>
+        <th class="sortable" onclick="sortBy('lastchecked','num')">Last checked<span class="sort-ind" data-k="lastchecked"></span></th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
@@ -1236,6 +1280,45 @@ function removeHost(h) {{
     location.reload();
   }});
 }}
+function selectedHosts() {{
+  return Array.prototype.slice.call(document.querySelectorAll('.host-check:checked'))
+    .map(function(x){{ return x.value; }});
+}}
+function updateBulkBar() {{
+  var n = selectedHosts().length;
+  var btn = document.getElementById('bulkRemoveBtn');
+  if (btn) {{ btn.disabled = n === 0; btn.textContent = n ? ('Remove selected (' + n + ')') : 'Remove selected'; }}
+  var all = document.querySelectorAll('.host-check');
+  var ca = document.getElementById('checkAll');
+  if (ca) ca.checked = (all.length > 0 && n === all.length);
+}}
+function onCheck(ev) {{ ev.stopPropagation(); updateBulkBar(); }}
+function toggleAll(master) {{
+  document.querySelectorAll('.host-check').forEach(function(x){{ x.checked = master.checked; }});
+  updateBulkBar();
+}}
+function selectStale() {{
+  document.querySelectorAll('tr.host-row').forEach(function(r){{
+    var c = r.querySelector('.host-check');
+    if (c) c.checked = (r.dataset.stale === '1');
+  }});
+  updateBulkBar();
+}}
+function clearSel() {{
+  document.querySelectorAll('.host-check').forEach(function(x){{ x.checked = false; }});
+  updateBulkBar();
+}}
+function removeSelected() {{
+  var hosts = selectedHosts();
+  if (!hosts.length) return;
+  if (!confirm('Remove ' + hosts.length + ' host(s) from the dashboard?\\n\\n' + hosts.join(', ') +
+               '\\n\\nHosts that still exist and are reachable will reappear on the next scan.')) return;
+  post('/api/remove', {{hosts: hosts}}).then(function(res){{
+    if (!res.ok) {{ alert('Error: ' + (res.body.description || JSON.stringify(res.body))); return; }}
+    location.reload();
+  }});
+}}
+updateBulkBar();
 function showAddHost() {{
   document.getElementById('addHostErr').textContent = '';
   document.getElementById('addHostInput').value = '';
