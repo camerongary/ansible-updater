@@ -35,7 +35,7 @@
   "display_name": {{ (ansible_hostname | default(inventory_hostname)) | to_json }},
   "ip_address": {{ (ansible_default_ipv4.address | default('N/A')) | to_json }},
   "os_family": {{ ansible_os_family | to_json }},
-  "os_name": {{ (ansible_distribution ~ ' ' ~ ansible_distribution_version) | to_json }},
+  "os_name": {{ (('macOS' if ansible_distribution == 'MacOSX' else ansible_distribution) ~ ' ' ~ ansible_distribution_version) | to_json }},
   "kernel": {{ ansible_kernel | to_json }},
   "timestamp": {{ ansible_date_time.iso8601 | to_json }},
   "updates_available": {{ ns.pkgs | length }},

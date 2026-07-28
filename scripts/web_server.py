@@ -303,6 +303,8 @@ def index():
     for host in results:
         hostname = host.get("hostname", "Unknown")
         display = host.get("display_name") or hostname
+        # Ansible reports macOS as "MacOSX"; show the modern name.
+        os_name = (host.get("os_name") or "Unknown").replace("MacOSX", "macOS")
         cls, label = status_badge(host)
         packages = host.get("available_packages", [])
         reboot = host.get("reboot_required", False)
@@ -437,12 +439,12 @@ def index():
 
         rows += f"""
             <tr class="host-row{' stale' if is_stale else ''}" onclick="toggle('{hostname}')" data-host="{hostname}"
-                data-name="{display}" data-os="{host.get('os_name','Unknown')}" data-ip="{ip}"
+                data-name="{display}" data-os="{os_name}" data-ip="{ip}"
                 data-updates="{host.get('updates_available',0)}" data-security="{host.get('security_updates',0)}"
                 data-reboot="{1 if reboot else 0}" data-status="{label}" data-stale="{1 if is_stale else 0}">
                 <td class="check-cell" onclick="event.stopPropagation()"><input type="checkbox" class="host-check" value="{hostname}" onclick="onCheck(event)"></td>
                 <td><strong>{display}</strong></td>
-                <td>{host.get('os_name','Unknown')}</td>
+                <td>{os_name}</td>
                 <td><span class="ip-cell">{ip}</span>{copy_btn}</td>
                 <td><span class="number-badge">{host.get('updates_available',0)}</span></td>
                 <td><span class="number-badge">{host.get('security_updates',0)}</span></td>
