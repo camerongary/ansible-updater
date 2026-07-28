@@ -318,17 +318,12 @@ def index():
         lc = host.get("_last_checked")
         age = (now_ts - lc) if lc else None
         is_stale = age is not None and age > stale_after
-        if lc:
-            last_checked_str = datetime.fromtimestamp(lc).strftime("%Y-%m-%d %H:%M")
-            checked_title = f"Last checked {last_checked_str} ({human_age(age)})"
-        else:
-            last_checked_str = "unknown"
-            checked_title = "Last checked: unknown"
-        stale_badge = (
+        last_checked_str = datetime.fromtimestamp(lc).strftime("%Y-%m-%d %H:%M") if lc else "unknown"
+        stale_cell = (
             f'<span class="status-badge status-stale" title="Not refreshed since {last_checked_str} '
             f'— missed at least {stale_cycles} check cycles; the host may be offline or removed.">'
-            f'&#9888; Stale &middot; {human_age(age)}</span> '
-            if is_stale else ""
+            f'&#9888; Stale &middot; {human_age(age)}</span>'
+            if is_stale else '<span class="stale-ok">&mdash;</span>'
         )
         ip = host.get("ip_address", "N/A")
         copy_btn = (
@@ -440,14 +435,11 @@ def index():
                 </td>
             </tr>"""
 
-        lc_epoch = int(lc) if lc else 0
-        lc_cell = human_age(age) if lc else "&mdash;"
         rows += f"""
             <tr class="host-row{' stale' if is_stale else ''}" onclick="toggle('{hostname}')" data-host="{hostname}"
                 data-name="{display}" data-os="{host.get('os_name','Unknown')}" data-ip="{ip}"
                 data-updates="{host.get('updates_available',0)}" data-security="{host.get('security_updates',0)}"
-                data-reboot="{1 if reboot else 0}" data-status="{label}" data-stale="{1 if is_stale else 0}"
-                data-lastchecked="{lc_epoch}" title="{checked_title}">
+                data-reboot="{1 if reboot else 0}" data-status="{label}" data-stale="{1 if is_stale else 0}">
                 <td class="check-cell" onclick="event.stopPropagation()"><input type="checkbox" class="host-check" value="{hostname}" onclick="onCheck(event)"></td>
                 <td><strong>{display}</strong></td>
                 <td>{host.get('os_name','Unknown')}</td>
@@ -455,8 +447,8 @@ def index():
                 <td><span class="number-badge">{host.get('updates_available',0)}</span></td>
                 <td><span class="number-badge">{host.get('security_updates',0)}</span></td>
                 <td><span class="status-badge {'status-danger' if reboot else 'status-success'}">{'Yes' if reboot else 'No'}</span></td>
-                <td><span class="status-badge {cls}">{label}</span> {stale_badge}{relup_badge}{auto_badge}</td>
-                <td class="lastcheck-cell">{lc_cell}</td>
+                <td><span class="status-badge {cls}">{label}</span> {relup_badge}{auto_badge}</td>
+                <td class="stale-cell">{stale_cell}</td>
             </tr>{detail}"""
 
     if not results:
@@ -858,7 +850,8 @@ header p {{ color:#666; font-size:14px; }}
 .bulk-bar .btn {{ padding:6px 12px; font-size:13px; }}
 .check-cell {{ width:36px; text-align:center; padding-left:14px !important; }}
 .check-cell input {{ cursor:pointer; width:15px; height:15px; }}
-.lastcheck-cell {{ color:#888; font-size:12px; white-space:nowrap; }}
+.stale-cell {{ white-space:nowrap; }}
+.stale-ok {{ color:#c8ccd0; }}
 table {{ width:100%; border-collapse:collapse; }}
 thead {{ background:#f8f9fa; }}
 th {{ padding:14px 30px; text-align:left; font-weight:600; color:#666; font-size:12px;
@@ -980,7 +973,7 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
         <th class="sortable" onclick="sortBy('security','num')">Security<span class="sort-ind" data-k="security"></span></th>
         <th class="sortable" onclick="sortBy('reboot','num')">Reboot<span class="sort-ind" data-k="reboot"></span></th>
         <th class="sortable" onclick="sortBy('status','text')">Status<span class="sort-ind" data-k="status"></span></th>
-        <th class="sortable" onclick="sortBy('lastchecked','num')">Last checked<span class="sort-ind" data-k="lastchecked"></span></th>
+        <th class="sortable" onclick="sortBy('stale','num')">Stale<span class="sort-ind" data-k="stale"></span></th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
