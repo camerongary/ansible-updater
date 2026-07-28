@@ -14,6 +14,7 @@ import os
 import glob
 import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, request, abort
@@ -193,16 +194,34 @@ def save_manual_hosts(hosts):
 
 
 def load_results():
-    """Load all per-host check results."""
+    """Load all per-host check results, tagging each with when its result file
+    was last written (mtime) so the UI can flag hosts that have gone stale."""
     results = []
     for path in sorted(glob.glob(os.path.join(REPORTS_DIR, "*_update_result.json"))):
         try:
             with open(path) as f:
-                results.append(json.load(f))
+                d = json.load(f)
+            try:
+                d["_last_checked"] = os.path.getmtime(path)
+            except OSError:
+                d["_last_checked"] = None
+            results.append(d)
         except Exception as e:
             print(f"Error loading {path}: {e}")
     results.sort(key=lambda r: r.get("hostname", ""))
     return results
+
+
+def human_age(seconds):
+    """Compact relative age, e.g. '12m ago', '5h ago', '3d ago'."""
+    seconds = int(seconds)
+    if seconds < 90:
+        return f"{seconds}s ago"
+    if seconds < 5400:
+        return f"{seconds // 60}m ago"
+    if seconds < 129600:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
 
 
 def load_host(host):
@@ -266,6 +285,18 @@ def index():
     update_interval = os.environ.get("UPDATE_INTERVAL", "3600")
     require_approval = os.environ.get("REQUIRE_APPROVAL", "true").lower() != "false"
     auto_hosts, autoreboot_hosts = load_settings()
+    # A host is "stale" if its result file hasn't been refreshed in the last
+    # STALE_CYCLES check cycles — i.e. it dropped out of discovery (offline /
+    # removed) or has been unreachable for a while. Non-destructive: just flagged.
+    try:
+        stale_cycles = int(os.environ.get("STALE_CYCLES", "2"))
+    except ValueError:
+        stale_cycles = 2
+    try:
+        stale_after = max(int(update_interval) * stale_cycles, 600)
+    except ValueError:
+        stale_after = 7200
+    now_ts = time.time()
 
     rows = ""
     pkg_data = {}   # hostname -> compact package list, rendered lazily in JS
@@ -283,6 +314,22 @@ def index():
         )
         relup = (host.get("release_upgrade") or "").strip()
         relup_badge = f'<span class="status-badge status-relup" title="{relup}">Release upgrade</span> ' if relup else ""
+        # Staleness: has this host's result been refreshed recently?
+        lc = host.get("_last_checked")
+        age = (now_ts - lc) if lc else None
+        is_stale = age is not None and age > stale_after
+        if lc:
+            last_checked_str = datetime.fromtimestamp(lc).strftime("%Y-%m-%d %H:%M")
+            checked_title = f"Last checked {last_checked_str} ({human_age(age)})"
+        else:
+            last_checked_str = "unknown"
+            checked_title = "Last checked: unknown"
+        stale_badge = (
+            f'<span class="status-badge status-stale" title="Not refreshed since {last_checked_str} '
+            f'— missed at least {stale_cycles} check cycles; the host may be offline or removed.">'
+            f'&#9888; Stale &middot; {human_age(age)}</span> '
+            if is_stale else ""
+        )
         ip = host.get("ip_address", "N/A")
         copy_btn = (
             f'<button class="copy-btn" title="Copy IP" aria-label="Copy IP" '
@@ -394,17 +441,18 @@ def index():
             </tr>"""
 
         rows += f"""
-            <tr class="host-row" onclick="toggle('{hostname}')" data-host="{hostname}"
+            <tr class="host-row{' stale' if is_stale else ''}" onclick="toggle('{hostname}')" data-host="{hostname}"
                 data-name="{display}" data-os="{host.get('os_name','Unknown')}" data-ip="{ip}"
                 data-updates="{host.get('updates_available',0)}" data-security="{host.get('security_updates',0)}"
-                data-reboot="{1 if reboot else 0}" data-status="{label}">
+                data-reboot="{1 if reboot else 0}" data-status="{label}" data-stale="{1 if is_stale else 0}"
+                title="{checked_title}">
                 <td><strong>{display}</strong></td>
                 <td>{host.get('os_name','Unknown')}</td>
                 <td><span class="ip-cell">{ip}</span>{copy_btn}</td>
                 <td><span class="number-badge">{host.get('updates_available',0)}</span></td>
                 <td><span class="number-badge">{host.get('security_updates',0)}</span></td>
                 <td><span class="status-badge {'status-danger' if reboot else 'status-success'}">{'Yes' if reboot else 'No'}</span></td>
-                <td><span class="status-badge {cls}">{label}</span> {relup_badge}{auto_badge}</td>
+                <td><span class="status-badge {cls}">{label}</span> {stale_badge}{relup_badge}{auto_badge}</td>
             </tr>{detail}"""
 
     if not results:
@@ -783,6 +831,11 @@ th {{ padding:14px 30px; text-align:left; font-weight:600; color:#666; font-size
 td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
 .host-row {{ cursor:pointer; }}
 .host-row:hover {{ background:#f8f9fa; }}
+.host-row.stale td {{ color:#9aa0a6; }}
+.host-row.stale td strong {{ color:#6b7075; }}
+.host-row.stale {{ background:repeating-linear-gradient(45deg,#fafafa,#fafafa 10px,#f4f4f5 10px,#f4f4f5 20px); }}
+.host-row.stale:hover {{ background:#eef0f2; }}
+.status-stale {{ background:#8a8f98; color:#fff; }}
 .sortable {{ cursor:pointer; user-select:none; white-space:nowrap; }}
 .sortable:hover {{ color:#667eea; }}
 .sort-ind {{ margin-left:5px; font-size:10px; color:#667eea; }}
