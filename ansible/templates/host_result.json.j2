@@ -19,7 +19,14 @@
     {%- set current_version = (line.split('upgradable from:')[1] | trim | replace(']', '') | trim) -%}
     {%- set is_security = ('security' in repo) or (name in security_names) -%}
     {%- set _ = ns.pkgs.append({'name': name, 'current_version': current_version, 'new_version': new_version, 'security': is_security}) -%}
-  {%- elif line and (ansible_pkg_mgr != "apt") and (line.split() | length >= 2) -%}
+  {%- elif line and (ansible_pkg_mgr == "homebrew") and ('(' in line) -%}
+    {#- e.g. "cryptography (49.0.0) < 50.0.0" (formula) or "app (1) != 2" (cask) -#}
+    {%- set name = line.split('(')[0] | trim -%}
+    {%- set rest = line.split('(', 1)[1] -%}
+    {%- set cur = rest.split(')')[0] | trim -%}
+    {%- set new_version = (rest.split(')', 1)[1] | replace('!=', '') | replace('<', '') | trim) -%}
+    {%- set _ = ns.pkgs.append({'name': name, 'current_version': cur, 'new_version': new_version, 'security': false}) -%}
+  {%- elif line and (ansible_pkg_mgr not in ["apt", "homebrew"]) and (line.split() | length >= 2) -%}
     {#- "name.arch version" from dnf check-mode or yum check-update (RedHat / XCP-ng) -#}
     {%- set parts = line.split() -%}
     {%- set name = parts[0] -%}

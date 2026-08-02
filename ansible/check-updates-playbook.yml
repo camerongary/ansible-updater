@@ -178,6 +178,29 @@
         - ansible_pkg_mgr == "yum"
         - yum_security.stdout_lines is defined
 
+    # ---------- HOMEBREW (macOS) ----------
+    # brew must NOT run as root, so become:false (the play otherwise escalates).
+    # brew isn't on the non-interactive PATH; call it by absolute path.
+    - name: Homebrew - list outdated formulae and casks
+      shell: |
+        export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1
+        BREW=$(command -v brew 2>/dev/null || echo /opt/homebrew/bin/brew)
+        [ -x "$BREW" ] || BREW=/usr/local/bin/brew
+        "$BREW" update >/dev/null 2>&1 || true
+        "$BREW" outdated --verbose 2>/dev/null
+      args:
+        executable: /bin/bash
+      register: brew_outdated
+      changed_when: false
+      failed_when: false
+      become: false
+      when: ansible_pkg_mgr == "homebrew"
+
+    - name: Homebrew - record upgradable lines
+      set_fact:
+        upgradable_lines: "{{ brew_outdated.stdout_lines | reject('equalto', '') | list }}"
+      when: ansible_pkg_mgr == "homebrew"
+
     - name: RPM - determine if reboot is required
       # Prefer needs-restarting (dnf-utils). Otherwise a reboot is needed if a
       # kernel or hypervisor package was installed *after* the last boot. This is

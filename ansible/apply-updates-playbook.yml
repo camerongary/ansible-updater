@@ -29,6 +29,21 @@
       when: ansible_pkg_mgr == "apt"
       register: debian_apply
 
+    - name: Homebrew - upgrade approved packages
+      # brew refuses to run as root, so become:false. Absolute path (not on the
+      # non-interactive PATH). Casks may need sudo internally and will prompt —
+      # those must be upgraded manually; formulae upgrade cleanly here.
+      shell: |
+        export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1
+        BREW=$(command -v brew 2>/dev/null || echo /opt/homebrew/bin/brew)
+        [ -x "$BREW" ] || BREW=/usr/local/bin/brew
+        "$BREW" upgrade {{ approved_packages | map('quote') | join(' ') }}
+      args:
+        executable: /bin/bash
+      when: ansible_pkg_mgr == "homebrew"
+      become: false
+      register: brew_apply
+
     - name: RPM - import distro GPG keys so signed packages validate
       # dnf/yum (interactive) prompt to import repo keys on first use; the modules
       # run non-interactively and won't, so signed packages fail GPG validation.
