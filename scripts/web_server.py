@@ -519,18 +519,21 @@ def api_audit():
     records = audit.read(limit=max(1, min(limit, 500)))
     # Enrich each record with the host's friendly name so the activity log can
     # show hostname + IP (the audit log only stores the IP/inventory name).
-    namemap = {}
+    namemap, mgrmap = {}, {}
     for r in load_results():
-        dn = r.get("display_name")
-        if not dn:
-            continue
+        mgr = r.get("pkg_manager") or ("homebrew" if r.get("os_family") == "Darwin" else None)
         for key in (r.get("hostname"), r.get("ip_address")):
             if key:
-                namemap[key] = dn
+                if r.get("display_name"):
+                    namemap[key] = r["display_name"]
+                if mgr:
+                    mgrmap[key] = mgr
     for rec in records:
-        dn = namemap.get(rec.get("host", ""))
-        if dn:
-            rec["display_name"] = dn
+        h = rec.get("host", "")
+        if namemap.get(h):
+            rec["display_name"] = namemap[h]
+        if mgrmap.get(h):
+            rec["pkg_manager"] = mgrmap[h]
     return jsonify(records)
 
 
@@ -1392,10 +1395,12 @@ function auditRow(it, idx) {{
   var caret = hasPkgs ? '<span class="audit-caret">&#9656;</span>' : '<span class="audit-caret"></span>';
   // Show time-of-day within a date group (the date is in the group header).
   var tod = (it.ts || '').indexOf('T') >= 0 ? it.ts.split('T')[1].slice(0,8) : it.ts;
+  var brew = it.pkg_manager === 'homebrew'
+    ? '<span class="status-badge status-brew" title="Homebrew update">brew</span>' : '';
   var row = '<div class="audit-item' + (hasPkgs ? ' expandable" onclick="toggleAudit(' + idx + ')"' : '"') + '>' +
     caret +
     '<span class="audit-ts">' + tod + '</span>' +
-    '<span class="status-badge status-info">' + it.action + '</span>' +
+    '<span class="status-badge status-info">' + it.action + '</span>' + brew +
     '<span class="audit-host">' + nameHtml + '</span>' +
     '<span>' + pk + '</span>' + badge(it.result) +
     '<span style="color:#999;">' + (it.detail || '') + '</span></div>';
