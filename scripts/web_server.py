@@ -305,6 +305,10 @@ def index():
         display = host.get("display_name") or hostname
         # Ansible reports macOS as "MacOSX"; show the modern name.
         os_name = (host.get("os_name") or "Unknown").replace("MacOSX", "macOS")
+        # macOS updates come from Homebrew — make that obvious.
+        is_brew = host.get("pkg_manager") == "homebrew" or host.get("os_family") == "Darwin"
+        brew_badge = ('<span class="status-badge status-brew" title="Updates managed by Homebrew (brew)">Homebrew</span>'
+                      if is_brew else "")
         cls, label = status_badge(host)
         packages = host.get("available_packages", [])
         reboot = host.get("reboot_required", False)
@@ -423,10 +427,15 @@ def index():
                 f'<pre id="relup-{hostname}" style="background:#2d2d2d;color:#eee;padding:12px 14px;border-radius:8px;font-size:13px;margin-bottom:12px;">sudo do-release-upgrade</pre>'
                 if relup else ""
             )
+            brew_note = ('<p style="margin-bottom:10px;color:#8a4b00;font-size:13px;">'
+                         '<strong>Homebrew:</strong> these are <code>brew</code> packages — Approve runs '
+                         '<code>brew upgrade</code> (formulae only; casks needing sudo must be upgraded manually).</p>'
+                         if is_brew else "")
             detail = f"""
             <tr class="detail-row" id="detail-{hostname}" style="display:none;">
                 <td colspan="9">
                     {relup_note}
+                    {brew_note}
                     <div class="pkg-toolbar">
                         <button class="link" onclick="selectAll('{hostname}', true)">Select all</button>
                         <button class="link" onclick="selectAll('{hostname}', false)">Clear</button>
@@ -444,7 +453,7 @@ def index():
                 data-reboot="{1 if reboot else 0}" data-status="{label}" data-stale="{1 if is_stale else 0}">
                 <td class="check-cell" onclick="event.stopPropagation()"><input type="checkbox" class="host-check" value="{hostname}" onclick="onCheck(event)"></td>
                 <td><strong>{display}</strong></td>
-                <td>{os_name}</td>
+                <td>{os_name} {brew_badge}</td>
                 <td><span class="ip-cell">{ip}</span>{copy_btn}</td>
                 <td><span class="number-badge">{host.get('updates_available',0)}</span></td>
                 <td><span class="number-badge">{host.get('security_updates',0)}</span></td>
@@ -879,6 +888,7 @@ td {{ padding:14px 30px; border-bottom:1px solid #e9ecef; color:#555; }}
 .status-auto {{ background:#e8f9f0; color:#1a9d6e; }}
 .status-autoreboot {{ background:#fff8e1; color:#b8860b; }}
 .status-relup {{ background:#fde7d3; color:#a15c00; }}
+.status-brew {{ background:#f6ddc0; color:#8a4b00; }}
 .status-muted {{ background:#eceff1; color:#607d8b; }}
 .number-badge {{ background:#f0f0f0; padding:4px 8px; border-radius:4px; font-weight:600; color:#333; }}
 .ip-cell {{ font-variant-numeric:tabular-nums; }}
