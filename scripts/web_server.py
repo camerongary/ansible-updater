@@ -98,9 +98,10 @@ def save_viewer_auth(d):
 
 
 def _is_admin(auth):
+    # compare_digest rejects non-ASCII str; compare as UTF-8 bytes.
     return bool(DASHBOARD_PASSWORD) and bool(auth) and \
         auth.username == DASHBOARD_USER and \
-        hmac.compare_digest(auth.password or "", DASHBOARD_PASSWORD)
+        hmac.compare_digest((auth.password or "").encode("utf-8"), DASHBOARD_PASSWORD.encode("utf-8"))
 
 
 def _is_viewer(auth):
