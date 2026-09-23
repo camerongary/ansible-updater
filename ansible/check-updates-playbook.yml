@@ -3,11 +3,19 @@
 # Writes /reports/<host>_update_result.json (status: checked) via templates/host_result.json.j2.
 - name: Check for available updates (Debian and RedHat)
   hosts: all
-  gather_facts: yes
+  # Gather facts WITHOUT become: escalating for facts triggers sudo on the target
+  # (e.g. a Mac whose passwordless sudo broke), which hangs the whole play. Facts
+  # need no root. Package tasks below still escalate where needed.
+  gather_facts: no
   vars:
     check_status: checked
 
   pre_tasks:
+    - name: Gather facts (no privilege escalation)
+      ansible.builtin.setup:
+      become: false
+      timeout: 60
+
     - name: Initialize check facts
       set_fact:
         upgradable_lines: []

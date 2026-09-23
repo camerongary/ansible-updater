@@ -6,12 +6,18 @@
 # Never reboots (reboot is a separate, separately-approved action).
 - name: Apply approved updates
   hosts: all
-  gather_facts: yes
+  # Facts without become (escalating for facts hangs on hosts with broken sudo).
+  gather_facts: no
   vars:
     packages: ""        # comma-separated approved package names
     apply_timestamp: "{{ ansible_date_time.iso8601 | default('') }}"
 
   pre_tasks:
+    - name: Gather facts (no privilege escalation)
+      ansible.builtin.setup:
+      become: false
+      timeout: 60
+
     - name: Parse approved package list
       set_fact:
         approved_packages: "{{ packages.split(',') | map('trim') | reject('equalto', '') | list }}"
