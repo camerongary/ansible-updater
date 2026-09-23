@@ -29,6 +29,17 @@ TRIGGER_FILE="/tmp/trigger_scan"   # dashboard "Scan Now" drops this
 LOCK_FILE="/tmp/scan_running"       # UI busy flag (dashboard reads it)
 ANSIBLE_LOCK="/tmp/ansible.lock"    # mutex dir: only one playbook at a time
 
+# Timeouts so one unreachable/hung host can never wedge a whole cycle (and thus
+# every later cycle) — this happened when a sleeping Mac left a stale SSH mux.
+PLAYBOOK_TIMEOUT_CYCLE="${PLAYBOOK_TIMEOUT_CYCLE:-1200}"   # full check cycle
+PLAYBOOK_TIMEOUT_HOST="${PLAYBOOK_TIMEOUT_HOST:-300}"      # single-host check/recheck/reboot
+PLAYBOOK_TIMEOUT_APPLY="${PLAYBOOK_TIMEOUT_APPLY:-1800}"   # apply (installs, slower)
+# Disable SSH ControlMaster mux: a dead master socket (host slept/rebooted) makes
+# new connections hang forever regardless of ConnectTimeout. Bound every connect.
+export ANSIBLE_TIMEOUT="${ANSIBLE_TIMEOUT:-30}"
+export ANSIBLE_GATHER_TIMEOUT="${ANSIBLE_GATHER_TIMEOUT:-30}"
+export ANSIBLE_SSH_ARGS="-o ControlMaster=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+
 mkdir -p "$REPORTS_DIR" "$(dirname "$LOG_FILE")"
 
 echo "[$(date)] Starting Ansible Update Manager" | tee -a "$LOG_FILE"
@@ -257,9 +268,11 @@ recheck_host() {
     local inv="/tmp/recheck_${host}.yml"
     printf 'all:\n  hosts:\n    %s:\n      ansible_user: %s\n' "$host" "$user" > "$inv"
     acquire_lock
-    ansible-playbook "$ANSIBLE_DIR/check-updates-playbook.yml" -i "$inv" -l "$host" \
+    timeout -k 30 "$PLAYBOOK_TIMEOUT_HOST" \
+        ansible-playbook "$ANSIBLE_DIR/check-updates-playbook.yml" -i "$inv" -l "$host" \
         2>&1 | tee -a "$LOG_FILE"
     local rc=${PIPESTATUS[0]}
+    [ "$rc" = "124" ] && log "recheck of $host timed out after ${PLAYBOOK_TIMEOUT_HOST}s"
     release_lock
     rm -f "$inv"
     return "$rc"
@@ -328,10 +341,14 @@ run_check() {
         inv="$tmp"; limit_arg="-l $host"
     fi
     log "Checking for available updates ${host:+on $host}..."
+    local to="$PLAYBOOK_TIMEOUT_CYCLE"
+    [ -n "$host" ] && to="$PLAYBOOK_TIMEOUT_HOST"
     acquire_lock
-    ansible-playbook "$ANSIBLE_DIR/check-updates-playbook.yml" -i "$inv" $limit_arg \
+    timeout -k 30 "$to" \
+        ansible-playbook "$ANSIBLE_DIR/check-updates-playbook.yml" -i "$inv" $limit_arg \
         2>&1 | tee -a "$LOG_FILE"
     local rc=${PIPESTATUS[0]}
+    [ "$rc" = "124" ] && log "check ${host:+of $host }timed out after ${to}s — releasing lock so next cycle runs"
     release_lock
     [ -n "$tmp" ] && rm -f "$tmp"
     return "$rc"
@@ -392,11 +409,13 @@ process_workorder() {
     touch "$LOCK_FILE"
     acquire_lock
     if [ "$action" = "apply" ]; then
-        ansible-playbook "$ANSIBLE_DIR/apply-updates-playbook.yml" -i "$inv" \
+        timeout -k 30 "$PLAYBOOK_TIMEOUT_APPLY" \
+            ansible-playbook "$ANSIBLE_DIR/apply-updates-playbook.yml" -i "$inv" \
             -l "$host" -e "packages=$packages" 2>&1 | tee -a "$LOG_FILE"
         rc=${PIPESTATUS[0]}
     elif [ "$action" = "reboot" ]; then
-        ansible-playbook "$ANSIBLE_DIR/reboot-playbook.yml" -i "$inv" \
+        timeout -k 30 "$PLAYBOOK_TIMEOUT_HOST" \
+            ansible-playbook "$ANSIBLE_DIR/reboot-playbook.yml" -i "$inv" \
             -l "$host" 2>&1 | tee -a "$LOG_FILE"
         rc=${PIPESTATUS[0]}
     else
