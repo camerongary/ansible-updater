@@ -58,6 +58,25 @@
       changed_when: false
       when: ansible_pkg_mgr in ["yum", "dnf"]
 
+    - name: RPM - keep download cache from accumulating (keepcache=0)
+      # Ensures downloaded rpms are dropped after install so /var/cache/dnf can't
+      # grow unbounded across cycles (a full disk broke apply on a tight VM).
+      ini_file:
+        path: /etc/dnf/dnf.conf
+        section: main
+        option: keepcache
+        value: "0"
+        no_extra_spaces: true
+      when: ansible_pkg_mgr == "dnf"
+      failed_when: false
+
+    - name: RPM - clear stale package cache before installing
+      # A prior failed download can leave partial rpms that fill the disk; clear
+      # them first so this apply has room. Metadata is kept (only packages purged).
+      shell: dnf clean packages 2>/dev/null || yum clean packages 2>/dev/null || true
+      when: ansible_pkg_mgr in ["yum", "dnf"]
+      changed_when: false
+
     - name: dnf - install approved packages
       dnf:
         name: "{{ approved_packages }}"
