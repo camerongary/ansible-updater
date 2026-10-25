@@ -61,12 +61,12 @@
     - name: RPM - keep download cache from accumulating (keepcache=0)
       # Ensures downloaded rpms are dropped after install so /var/cache/dnf can't
       # grow unbounded across cycles (a full disk broke apply on a tight VM).
-      ini_file:
+      # lineinfile is builtin; ini_file needs community.general (not installed).
+      lineinfile:
         path: /etc/dnf/dnf.conf
-        section: main
-        option: keepcache
-        value: "0"
-        no_extra_spaces: true
+        regexp: '^keepcache='
+        line: 'keepcache=0'
+        insertafter: '^\[main\]'
       when: ansible_pkg_mgr == "dnf"
       failed_when: false
 
